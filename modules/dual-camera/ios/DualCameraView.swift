@@ -22,6 +22,8 @@ private enum Pip {
   }
 }
 
+/// Mesajlar JS tarafında kullanıcının dilinde gösterilir (src/i18n); buradan yalnızca `code`
+/// ve varsa sistemin verdiği ayrıntı gider.
 enum DualCameraError: LocalizedError {
   case notSupported
   case noCamera
@@ -30,21 +32,55 @@ enum DualCameraError: LocalizedError {
   case writerFailed(String)
   case photosDenied
   case saveFailed(String)
+  case photoFailed
+  case torchUnavailable
+  case torchFailed(String)
+  case audioSession(String)
+  case runtime(String)
+  case recordFailed(String)
 
-  var errorDescription: String? {
+  var code: String {
     switch self {
-    case .notSupported: return "Bu cihaz aynı anda iki kamerayı desteklemiyor."
-    case .noCamera: return "Kameralar açılamadı."
-    case .notRecording: return "Kayıt yapılmıyor."
-    case .tooShort: return "Kayıt çok kısa, hiç kare yakalanmadı."
-    case .writerFailed(let m): return "Video yazılamadı: \(m)"
-    case .photosDenied: return "Galeriye kaydetme izni yok. Ayarlar > DualCam > Fotoğraflar."
-    case .saveFailed(let m): return "Galeriye kaydedilemedi: \(m)"
+    case .notSupported: return "notSupported"
+    case .noCamera: return "noCamera"
+    case .notRecording: return "notRecording"
+    case .tooShort: return "tooShort"
+    case .writerFailed: return "writerFailed"
+    case .photosDenied: return "photosDenied"
+    case .saveFailed: return "saveFailed"
+    case .photoFailed: return "photoFailed"
+    case .torchUnavailable: return "torchUnavailable"
+    case .torchFailed: return "torchFailed"
+    case .audioSession: return "audioSession"
+    case .runtime: return "runtime"
+    case .recordFailed: return "recordFailed"
     }
+  }
+
+  var detail: String? {
+    switch self {
+    case .writerFailed(let d), .saveFailed(let d), .torchFailed(let d), .audioSession(let d),
+      .runtime(let d), .recordFailed(let d):
+      return d.isEmpty ? nil : d
+    default:
+      return nil
+    }
+  }
+
+  var errorDescription: String? { [code, detail].compactMap { $0 }.joined(separator: ": ") }
+}
+
+extension Error {
+  /// JS'e giden hata: çeviri için `code`, varsa `detail`.
+  var jsPayload: [String: Any] {
+    guard let error = self as? DualCameraError else {
+      return ["code": "unknown", "detail": localizedDescription]
+    }
+    return error.detail.map { ["code": error.code, "detail": $0] } ?? ["code": error.code]
   }
 }
 
-/// Tek bir kameranın video dosyası (görüntü + yaka mikrofonu sesi).
+/// Tek bir kameranın video dosyası (görüntü + varsa mikrofon sesi).
 private final class Track {
   let url: URL
   private(set) var writer: AVAssetWriter?
@@ -76,15 +112,18 @@ private final class Track {
     videoInput.expectsMediaDataInRealTime = true
     writer.add(videoInput)
 
-    let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-    audioInput.expectsMediaDataInRealTime = true
-    if writer.canAdd(audioInput) {
-      writer.add(audioInput)
-      self.audioInput = audioInput
+    // Mikrofon izni yoksa ses ayarı da yoktur; video sessiz kaydedilir.
+    if let audioSettings {
+      let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+      audioInput.expectsMediaDataInRealTime = true
+      if writer.canAdd(audioInput) {
+        writer.add(audioInput)
+        self.audioInput = audioInput
+      }
     }
 
     guard writer.startWriting() else {
-      throw DualCameraError.writerFailed(writer.error?.localizedDescription ?? "başlatılamadı")
+      throw DualCameraError.writerFailed(writer.error?.localizedDescription ?? "")
     }
     // İki dosya da aynı andan başlar; kurguda üst üste koyunca senkron olur.
     writer.startSession(atSourceTime: start)
@@ -122,7 +161,7 @@ private final class Track {
         completion(.success(url))
       } else {
         discard()
-        completion(.failure(DualCameraError.writerFailed(writer.error?.localizedDescription ?? "bilinmiyor")))
+        completion(.failure(DualCameraError.writerFailed(writer.error?.localizedDescription ?? "")))
       }
     }
   }
@@ -137,6 +176,70 @@ enum CameraMode: String {
 
   var usesBack: Bool { self != .front }
   var usesFront: Bool { self != .back }
+}
+
+/// Çekim türü: video (16:9) ya da foto (4:3, yüksek çözünürlük).
+enum CaptureKind: String {
+  case video, photo
+}
+
+/// Bir kameranın oturumdaki bağlantıları.
+private struct CameraLinks {
+  let device: AVCaptureDevice
+  let video: AVCaptureConnection // kayıt kareleri
+  let photo: AVCaptureConnection
+  let preview: AVCaptureConnection
+}
+
+/// Bir deklanşör basışı: seçili her kameradan bir foto. Sıra `outputs` sırasıdır (önce sahne, sonra yüz).
+private final class PhotoShot: NSObject, AVCapturePhotoCaptureDelegate {
+  private let outputs: [AVCapturePhotoOutput]
+  private let queue: DispatchQueue
+  private let completion: (PhotoShot, [Data], Error?) -> Void
+
+  // Yalnızca `queue` üzerinde kullanılır.
+  private var photos: [Data?]
+  private var remaining: Int
+  private var firstError: Error?
+
+  init(
+    outputs: [AVCapturePhotoOutput], queue: DispatchQueue,
+    completion: @escaping (PhotoShot, [Data], Error?) -> Void
+  ) {
+    self.outputs = outputs
+    self.queue = queue
+    self.completion = completion
+    photos = Array(repeating: nil, count: outputs.count)
+    remaining = outputs.count
+    super.init()
+  }
+
+  func photoOutput(
+    _ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?
+  ) {
+    let data = error == nil ? photo.fileDataRepresentation() : nil
+    queue.async { [self] in
+      if let data, let i = outputs.firstIndex(where: { $0 === output }) {
+        photos[i] = data
+      } else {
+        firstError = firstError ?? error ?? DualCameraError.photoFailed
+      }
+    }
+  }
+
+  /// Her çekim isteği için en son bu çağrılır (hata olsa da).
+  func photoOutput(
+    _ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
+    error: Error?
+  ) {
+    queue.async { [self] in
+      if let error { firstError = firstError ?? error }
+      remaining -= 1
+      if remaining == 0 {
+        completion(self, photos.compactMap { $0 }, firstError)
+      }
+    }
+  }
 }
 
 private final class Recorder {
@@ -175,21 +278,29 @@ final class DualCameraView: ExpoView,
 
   private let backOutput = AVCaptureVideoDataOutput()
   private let frontOutput = AVCaptureVideoDataOutput()
+  private let backPhotoOutput = AVCapturePhotoOutput()
+  private let frontPhotoOutput = AVCapturePhotoOutput()
   private let audioOutput = AVCaptureAudioDataOutput()
 
   // sessionQueue üzerinde kullanılır.
   private var isConfigured = false
   private var captureOrientation: AVCaptureVideoOrientation = .portrait
-  private var videoConnections: [AVCaptureConnection] = []
-  private var mirroredConnections: [AVCaptureConnection] = []
-  private var backConnections: [AVCaptureConnection] = []
-  private var frontConnections: [AVCaptureConnection] = []
+  private var back: CameraLinks?
+  private var front: CameraLinks?
+  private var audioConnection: AVCaptureConnection?
   private var activeMode: CameraMode = .both
+  private var activeKind: CaptureKind = .video
+  private var torchWanted = false
+  private var shots = Set<PhotoShot>() // çekimi süren fotolar (çıkış yalnızca zayıf tutar)
 
   // Ana thread üzerinde kullanılır.
   private var isRecording = false
   private var isLandscape = false
   private var mode: CameraMode = .both
+  private var kind: CaptureKind = .video
+  /// Kameranın verdiği karenin yataydaki en/boy oranı: videoda 16:9, fotoda 4:3.
+  private var frameRatio: CGFloat = 16 / 9
+  private var geometryObservation: NSKeyValueObservation?
 
   // Yalnızca dataQueue üzerinde kullanılır.
   private var recorder: Recorder?
@@ -215,17 +326,8 @@ final class DualCameraView: ExpoView,
                    name: .AVCaptureSessionRuntimeError, object: session)
     nc.addObserver(self, selector: #selector(sessionInterrupted),
                    name: .AVCaptureSessionWasInterrupted, object: session)
-    // Yatay sol <-> yatay sağ dönüşünde boyut değişmez, layoutSubviews çağrılmaz.
-    UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-    nc.addObserver(self, selector: #selector(deviceRotated),
-                   name: UIDevice.orientationDidChangeNotification, object: nil)
-  }
-
-  @objc private func deviceRotated() {
-    // Arayüz dönüşü bildirimden biraz sonra tamamlanır.
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-      self?.setNeedsLayout()
-    }
+    nc.addObserver(self, selector: #selector(sessionInterruptionEnded),
+                   name: .AVCaptureSessionInterruptionEnded, object: session)
   }
 
   deinit {
@@ -236,16 +338,16 @@ final class DualCameraView: ExpoView,
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    updateOrientation()
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)
+    updateOrientation()
     backPreview.frame = bounds
     backPreview.isHidden = !mode.usesBack
     frontContainer.isHidden = !mode.usesFront
 
-    // Kaydedilen karenin (16:9 ya da 9:16) ekrandaki yeri.
-    let aspect = isLandscape ? CGSize(width: 16, height: 9) : CGSize(width: 9, height: 16)
+    // Kaydedilen karenin (video 16:9, foto 4:3; dikeyde tersi) ekrandaki yeri.
+    let aspect = isLandscape ? CGSize(width: frameRatio, height: 1) : CGSize(width: 1, height: frameRatio)
     let vr = AVMakeRect(aspectRatio: aspect, insideRect: bounds)
     if mode == .front {
       // Sadece yüz: ön kamera tüm kareyi kaplar.
@@ -259,6 +361,9 @@ final class DualCameraView: ExpoView,
       frontContainer.layer.borderWidth = max(1, min(vr.width, vr.height) * Pip.borderRatio)
     }
     frontPreview.frame = frontContainer.bounds
+    // Çerçeve aynı kalsa bile önizleme, görüntüyü yeni yöne göre yeniden yerleştirsin.
+    backPreview.setNeedsLayout()
+    frontPreview.setNeedsLayout()
     CATransaction.commit()
   }
 
@@ -271,13 +376,71 @@ final class DualCameraView: ExpoView,
       guard let self else { return }
       self.activeMode = newMode
       self.applyCameraMode()
+      self.applyTorch()
     }
   }
 
-  /// sessionQueue üzerinde çağrılır. Kullanılmayan kameranın kare akışını kapatır (ısınma/pil).
+  /// JS'ten gelen çekim türü: "video" ya da "photo". Kayıt sırasında değişmez.
+  func setCaptureMode(_ value: String) {
+    guard !isRecording, let newKind = CaptureKind(rawValue: value), newKind != kind else { return }
+    kind = newKind
+    sessionQueue.async { [weak self] in
+      guard let self else { return }
+      self.activeKind = newKind
+      guard self.isConfigured else { return }
+      self.session.beginConfiguration()
+      do {
+        try self.applyFormats()
+      } catch {
+        self.emitError(error)
+      }
+      self.applyCameraMode()
+      self.session.commitConfiguration()
+      // Format değişince ışık sönebiliyor.
+      self.applyTorch()
+    }
+  }
+
+  /// JS'ten gelen ışık (arka kamera feneri) isteği. Kayıt sırasında da değişebilir.
+  func setTorch(_ on: Bool) {
+    sessionQueue.async { [weak self] in
+      guard let self else { return }
+      self.torchWanted = on
+      self.applyTorch()
+    }
+  }
+
+  /// sessionQueue üzerinde çağrılır. Işık yalnızca arka kamerada var; arka kamera kapalıyken söner.
+  private func applyTorch() {
+    guard let device = back?.device, device.hasTorch, session.isRunning else { return }
+    let on = torchWanted && activeMode.usesBack
+    if on && !device.isTorchAvailable {
+      emitError(DualCameraError.torchUnavailable)
+      return
+    }
+    do {
+      try device.lockForConfiguration()
+      defer { device.unlockForConfiguration() }
+      if on {
+        try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+      } else {
+        device.torchMode = .off
+      }
+    } catch {
+      emitError(DualCameraError.torchFailed(error.localizedDescription))
+    }
+  }
+
+  /// sessionQueue üzerinde çağrılır. Kullanılmayan kameranın ve o çekim türünde gerekmeyen çıkışların
+  /// akışını kapatır (ısınma/pil). Fotoda mikrofon da kapanır.
   private func applyCameraMode() {
-    backConnections.forEach { $0.isEnabled = activeMode.usesBack }
-    frontConnections.forEach { $0.isEnabled = activeMode.usesFront }
+    for (links, used) in [(back, activeMode.usesBack), (front, activeMode.usesFront)] {
+      guard let links else { continue }
+      links.preview.isEnabled = used
+      links.video.isEnabled = used && activeKind == .video
+      links.photo.isEnabled = used && activeKind == .photo
+    }
+    audioConnection?.isEnabled = activeKind == .video
   }
 
   /// Kamera yönünü arayüz yönüne eşitler. Kayıt sırasında değiştirmez (JS tarafı ekranı zaten kilitler).
@@ -291,6 +454,13 @@ final class DualCameraView: ExpoView,
     default: orientation = .portrait
     }
     isLandscape = orientation == .landscapeLeft || orientation == .landscapeRight
+    // Önizleme yönü ana thread'de, çerçeveyle aynı anda değişmeli. Arka planda değişince
+    // görüntü eski (dikey) yerleşimde kalıp köşede küçücük görünüyordu.
+    for preview in [backPreview, frontPreview] {
+      if let conn = preview.connection, conn.videoOrientation != orientation {
+        conn.videoOrientation = orientation
+      }
+    }
     sessionQueue.async { [weak self] in
       guard let self, self.captureOrientation != orientation else { return }
       self.captureOrientation = orientation
@@ -298,21 +468,24 @@ final class DualCameraView: ExpoView,
     }
   }
 
-  /// sessionQueue üzerinde çağrılır.
+  /// sessionQueue üzerinde çağrılır. Kaydedilen video ve fotoların yönü.
   private func applyOrientation() {
-    // Yalnızca yüz önizlemesi ayna gibidir; kaydedilen yüz videosu düzdür.
-    for conn in videoConnections {
-      conn.videoOrientation = captureOrientation
-      if conn.isVideoMirroringSupported {
-        conn.automaticallyAdjustsVideoMirroring = false
-        conn.isVideoMirrored = mirroredConnections.contains(conn)
-      }
+    for links in [back, front].compactMap({ $0 }) {
+      links.video.videoOrientation = captureOrientation
+      links.photo.videoOrientation = captureOrientation
     }
   }
 
   override func didMoveToWindow() {
     super.didMoveToWindow()
+    // Arayüz her döndüğünde yeniden yerleş. Yatay sol <-> sağ dönüşünde boyut değişmediği için
+    // layoutSubviews kendiliğinden çağrılmaz; sahnenin geometrisi ise her dönüşte değişir.
+    geometryObservation = window?.windowScene?.observe(\.effectiveGeometry) { [weak self] _, _ in
+      DispatchQueue.main.async { self?.setNeedsLayout() }
+    }
     if window != nil {
+      // Pencereye girmeden yapılan yerleşim yönü bilemez (varsayılan dikey); şimdi doğrusunu yap.
+      setNeedsLayout()
       UIApplication.shared.isIdleTimerDisabled = true
       sessionQueue.async { [weak self] in self?.startSession() }
     } else {
@@ -330,14 +503,18 @@ final class DualCameraView: ExpoView,
         try configureSession()
         isConfigured = true
       } catch {
-        emitError(error.localizedDescription)
+        emitError(error)
         return
       }
     }
     if !session.isRunning {
       session.startRunning()
     }
+    // Oturum durunca ışık da söner; yeniden açılınca geri yak.
+    applyTorch()
     DispatchQueue.main.async { [weak self] in
+      // Önizleme bağlantıları artık var; yönlerini ana thread'de ayarla.
+      self?.setNeedsLayout()
       self?.onReady([:])
       self?.emitMic()
     }
@@ -354,29 +531,52 @@ final class DualCameraView: ExpoView,
     defer { session.commitConfiguration() }
 
     guard
-      let back = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-      let front = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+      let backCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+      let frontCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
     else { throw DualCameraError.noCamera }
 
-    try addCamera(back, output: backOutput, preview: backPreview, mirrored: false)
-    try addCamera(front, output: frontOutput, preview: frontPreview, mirrored: true)
-    // İki kamera da 1080p; donanım kaldırmazsa önce yüz kamerasını 720p'ye düşür.
-    try selectFormat(back, maxWidth: 1920)
-    try selectFormat(front, maxWidth: 1920)
-    if session.hardwareCost > 1.0 {
-      try selectFormat(front, maxWidth: 1280)
-    }
-    if session.hardwareCost > 1.0 {
-      try selectFormat(back, maxWidth: 1280)
-    }
-    try addMicrophone()
+    back = try addCamera(
+      backCamera, output: backOutput, photoOutput: backPhotoOutput, preview: backPreview, mirrored: false)
+    front = try addCamera(
+      frontCamera, output: frontOutput, photoOutput: frontPhotoOutput, preview: frontPreview, mirrored: true)
+    applyOrientation()
+    try applyFormats()
+    // Mikrofon izni yoksa kamera yine açılır, video sessiz kaydedilir.
+    try? addMicrophone()
     applyCameraMode()
   }
 
+  /// sessionQueue üzerinde, oturum yapılandırılırken çağrılır. Video: 16:9 1080p; foto: 4:3, en yüksek
+  /// foto çözünürlüğü. Donanım iki kamerayı kaldırmazsa önce yüz kamerasını küçültür.
+  private func applyFormats() throws {
+    guard let back, let front else { return }
+    let photo = activeKind == .photo
+    try selectFormat(back.device, photo: photo, maxWidth: 1920)
+    try selectFormat(front.device, photo: photo, maxWidth: 1920)
+    if session.hardwareCost > 1.0 {
+      try selectFormat(front.device, photo: photo, maxWidth: 1280)
+    }
+    if session.hardwareCost > 1.0 {
+      try selectFormat(back.device, photo: photo, maxWidth: 1280)
+    }
+    // Foto, kameranın o anki formatının izin verdiği en büyük boyutta çekilsin.
+    for (links, output) in [(back, backPhotoOutput), (front, frontPhotoOutput)] {
+      if let dims = links.device.activeFormat.supportedMaxPhotoDimensions.max(by: { $0.width < $1.width }) {
+        output.maxPhotoDimensions = dims
+      }
+    }
+    let d = CMVideoFormatDescriptionGetDimensions(back.device.activeFormat.formatDescription)
+    let ratio = CGFloat(d.width) / CGFloat(d.height)
+    DispatchQueue.main.async { [weak self] in
+      self?.frameRatio = ratio
+      self?.setNeedsLayout()
+    }
+  }
+
   private func addCamera(
-    _ device: AVCaptureDevice, output: AVCaptureVideoDataOutput,
+    _ device: AVCaptureDevice, output: AVCaptureVideoDataOutput, photoOutput: AVCapturePhotoOutput,
     preview: AVCaptureVideoPreviewLayer, mirrored: Bool
-  ) throws {
+  ) throws -> CameraLinks {
     let input = try AVCaptureDeviceInput(device: device)
     guard session.canAddInput(input) else { throw DualCameraError.noCamera }
     session.addInputWithNoConnections(input)
@@ -394,35 +594,42 @@ final class DualCameraView: ExpoView,
     guard session.canAddConnection(outConn) else { throw DualCameraError.noCamera }
     session.addConnection(outConn)
 
+    guard session.canAddOutput(photoOutput) else { throw DualCameraError.noCamera }
+    session.addOutputWithNoConnections(photoOutput)
+    let photoConn = AVCaptureConnection(inputPorts: [port], output: photoOutput)
+    guard session.canAddConnection(photoConn) else { throw DualCameraError.noCamera }
+    session.addConnection(photoConn)
+
     preview.setSessionWithNoConnection(session)
     let previewConn = AVCaptureConnection(inputPort: port, videoPreviewLayer: preview)
     guard session.canAddConnection(previewConn) else { throw DualCameraError.noCamera }
     session.addConnection(previewConn)
 
-    videoConnections += [outConn, previewConn]
-    if mirrored {
-      mirroredConnections.append(previewConn)
-      frontConnections += [outConn, previewConn]
-    } else {
-      backConnections += [outConn, previewConn]
+    // Yalnızca yüz önizlemesi ayna gibidir; kaydedilen yüz videosu ve fotosu düzdür.
+    for conn in [outConn, photoConn, previewConn] where conn.isVideoMirroringSupported {
+      conn.automaticallyAdjustsVideoMirroring = false
+      conn.isVideoMirrored = mirrored && conn === previewConn
     }
-    applyOrientation()
+
+    return CameraLinks(device: device, video: outConn, photo: photoConn, preview: previewConn)
   }
 
-  /// Çoklu kamera destekli, 16:9, en fazla `maxWidth` genişlikte ve 30 fps yapabilen en büyük format.
-  private func selectFormat(_ device: AVCaptureDevice, maxWidth: Int32) throws {
+  /// Çoklu kamera destekli, 30 fps yapabilen, en fazla `maxWidth` genişlikte format.
+  /// Video: 16:9, en genişi. Foto: 4:3, en büyük foto çekebileni.
+  private func selectFormat(_ device: AVCaptureDevice, photo: Bool, maxWidth: Int32) throws {
+    let (w, h) = photo ? (4, 3) : (16, 9)
     let candidates = device.formats.filter { f in
       let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
       return f.isMultiCamSupported
         && d.width <= maxWidth
-        && Int(d.width) * 9 == Int(d.height) * 16
+        && Int(d.width) * h == Int(d.height) * w
         && f.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= 30 }
     }
-    guard let best = candidates.max(by: { a, b in
-      let da = CMVideoFormatDescriptionGetDimensions(a.formatDescription)
-      let db = CMVideoFormatDescriptionGetDimensions(b.formatDescription)
-      return da.width < db.width
-    }) else { return }
+    func score(_ f: AVCaptureDevice.Format) -> (Int32, Int32) {
+      let photoWidth = f.supportedMaxPhotoDimensions.map(\.width).max() ?? 0
+      return (photo ? photoWidth : 0, CMVideoFormatDescriptionGetDimensions(f.formatDescription).width)
+    }
+    guard let best = candidates.max(by: { score($0) < score($1) }) else { return }
 
     try device.lockForConfiguration()
     device.activeFormat = best
@@ -445,6 +652,7 @@ final class DualCameraView: ExpoView,
     let conn = AVCaptureConnection(inputPorts: [port], output: audioOutput)
     if session.canAddConnection(conn) {
       session.addConnection(conn)
+      audioConnection = conn
     }
   }
 
@@ -456,7 +664,7 @@ final class DualCameraView: ExpoView,
       try audio.setCategory(.playAndRecord, mode: .videoRecording, options: [.defaultToSpeaker])
       try audio.setActive(true)
     } catch {
-      emitError("Ses oturumu açılamadı: \(error.localizedDescription)")
+      emitError(DualCameraError.audioSession(error.localizedDescription))
     }
     preferExternalMic()
   }
@@ -485,13 +693,14 @@ final class DualCameraView: ExpoView,
 
   // MARK: - Hatalar / kesintiler
 
-  private func emitError(_ message: String) {
-    DispatchQueue.main.async { [weak self] in self?.onCameraError(["message": message]) }
+  private func emitError(_ error: Error) {
+    let payload = error.jsPayload
+    DispatchQueue.main.async { [weak self] in self?.onCameraError(payload) }
   }
 
   @objc private func sessionRuntimeError(_ note: Notification) {
     let error = note.userInfo?[AVCaptureSessionErrorKey] as? Error
-    emitError("Kamera hatası: \(error?.localizedDescription ?? "bilinmiyor")")
+    emitError(DualCameraError.runtime(error?.localizedDescription ?? ""))
     finishRecording(auto: true)
     sessionQueue.async { [weak self] in
       guard let self, self.isConfigured else { return }
@@ -502,6 +711,10 @@ final class DualCameraView: ExpoView,
   @objc private func sessionInterrupted() {
     // Arama geldi, uygulama arka plana geçti vs. Kaydı kapatıp galeriye kaydet.
     finishRecording(auto: true)
+  }
+
+  @objc private func sessionInterruptionEnded() {
+    sessionQueue.async { [weak self] in self?.applyTorch() }
   }
 
   // MARK: - Kayıt
@@ -541,7 +754,9 @@ final class DualCameraView: ExpoView,
             info["saved"] = true
             self?.onAutoStopped(info)
           case .failure(let error):
-            self?.onAutoStopped(["saved": false, "error": error.localizedDescription])
+            var payload = error.jsPayload
+            payload["saved"] = false
+            self?.onAutoStopped(payload)
           }
         }
       }
@@ -578,7 +793,11 @@ final class DualCameraView: ExpoView,
         completion(.failure(firstError ?? DualCameraError.tooShort))
         return
       }
-      Self.saveToPhotos(saved) { error in
+      Self.saveToPhotos({
+        for url in saved {
+          PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+        }
+      }) { error in
         saved.forEach { try? FileManager.default.removeItem(at: $0) }
         if let error {
           completion(.failure(error))
@@ -589,20 +808,65 @@ final class DualCameraView: ExpoView,
     }
   }
 
-  private static func saveToPhotos(_ urls: [URL], completion: @escaping (Error?) -> Void) {
+  private static func saveToPhotos(_ changes: @escaping () -> Void, completion: @escaping (Error?) -> Void) {
     PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
       guard status == .authorized || status == .limited else {
         completion(DualCameraError.photosDenied)
         return
       }
-      PHPhotoLibrary.shared().performChanges({
-        for url in urls {
-          PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
-        }
-      }) { ok, error in
-        completion(ok ? nil : DualCameraError.saveFailed(error?.localizedDescription ?? "bilinmiyor"))
+      PHPhotoLibrary.shared().performChanges(changes) { ok, error in
+        completion(ok ? nil : DualCameraError.saveFailed(error?.localizedDescription ?? ""))
       }
     }
+  }
+
+  // MARK: - Foto
+
+  /// Seçili kameralarla birer foto çeker ve ayrı ayrı galeriye kaydeder (önce sahne, sonra yüz).
+  func takePhoto(completion: @escaping (Result<[String: Any], Error>) -> Void) {
+    sessionQueue.async { [weak self] in
+      guard let self else { return }
+      let outputs = [
+        self.activeMode.usesBack ? self.backPhotoOutput : nil,
+        self.activeMode.usesFront ? self.frontPhotoOutput : nil,
+      ].compactMap { $0 }
+      guard self.session.isRunning, self.activeKind == .photo, !outputs.isEmpty else {
+        DispatchQueue.main.async { completion(.failure(DualCameraError.photoFailed)) }
+        return
+      }
+      let shot = PhotoShot(outputs: outputs, queue: self.sessionQueue) { [weak self] shot, photos, error in
+        self?.shots.remove(shot)
+        guard !photos.isEmpty else {
+          DispatchQueue.main.async { completion(.failure(error ?? DualCameraError.photoFailed)) }
+          return
+        }
+        Self.saveToPhotos({
+          for data in photos {
+            PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
+          }
+        }) { error in
+          DispatchQueue.main.async {
+            if let error {
+              completion(.failure(error))
+            } else {
+              completion(.success(["files": photos.count]))
+            }
+          }
+        }
+      }
+      self.shots.insert(shot)
+      for output in outputs {
+        output.capturePhoto(with: Self.photoSettings(for: output), delegate: shot)
+      }
+    }
+  }
+
+  private static func photoSettings(for output: AVCapturePhotoOutput) -> AVCapturePhotoSettings {
+    let settings = output.availablePhotoCodecTypes.contains(.hevc)
+      ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+      : AVCapturePhotoSettings()
+    settings.maxPhotoDimensions = output.maxPhotoDimensions
+    return settings
   }
 
   // MARK: - Kareler (dataQueue)
@@ -635,7 +899,7 @@ final class DualCameraView: ExpoView,
           try track.start(firstFrame: sampleBuffer, at: start, audioSettings: audioSettings)
         } catch {
           track.failed = true
-          emitError("Kamera kaydedilemiyor: \(error.localizedDescription)")
+          emitError(DualCameraError.recordFailed(error.localizedDescription))
           return
         }
       }
@@ -649,7 +913,7 @@ final class DualCameraView: ExpoView,
         track.discard()
         self.recorder = nil
         DispatchQueue.main.async { [weak self] in self?.isRecording = false }
-        emitError(error.localizedDescription)
+        emitError(error)
         return
       }
     }

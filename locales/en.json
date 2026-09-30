@@ -1,0 +1,8 @@
+{
+  "ios": {
+    "CFBundleDisplayName": "DualCam",
+    "NSCameraUsageDescription": "DualCam uses the front and back cameras to record videos and take photos.",
+    "NSMicrophoneUsageDescription": "DualCam records sound with your videos. Without access, videos are saved without sound.",
+    "NSPhotoLibraryAddUsageDescription": "DualCam saves your videos and photos to your library."
+  }
+}

@@ -2,6 +2,7 @@
   "expo": {
     "name": "DualCam",
     "slug": "DualCam",
+    "scheme": "dualcam",
     "version": "1.0.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
@@ -9,11 +10,13 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.burakarslan.dualcam",
+      "appleTeamId": "5BF7PPQH95",
       "infoPlist": {
-        "NSCameraUsageDescription": "Ön ve arka kamerayla aynı anda video çekmek için kamera gerekiyor.",
-        "NSMicrophoneUsageDescription": "Videoya ses (yaka mikrofonu) kaydetmek için mikrofon gerekiyor.",
-        "NSPhotoLibraryAddUsageDescription": "Çektiğin videoları galeriye kaydetmek için.",
-        "UIRequiresFullScreen": true
+        "NSCameraUsageDescription": "DualCam uses the front and back cameras to record videos and take photos.",
+        "NSMicrophoneUsageDescription": "DualCam records sound with your videos. Without access, videos are saved without sound.",
+        "NSPhotoLibraryAddUsageDescription": "DualCam saves your videos and photos to your library.",
+        "UIRequiresFullScreen": true,
+        "CFBundleAllowMixedLocalizations": true
       }
     },
     "android": {
@@ -27,6 +30,26 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-status-bar",
+      [
+        "expo-localization",
+        {
+          "supportedLocales": {
+            "ios": [
+              "en",
+              "tr"
+            ]
+          }
+        }
+      ],
+      "expo-sqlite"
+    ],
+    "locales": {
+      "tr": "./locales/tr.json",
+      "en": "./locales/en.json"
     }
   }
 }
