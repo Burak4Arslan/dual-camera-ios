@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "DualCam",
+    "slug": "DualCam",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.burakarslan.dualcam",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Ön ve arka kamerayla aynı anda video çekmek için kamera gerekiyor.",
+        "NSMicrophoneUsageDescription": "Videoya ses (yaka mikrofonu) kaydetmek için mikrofon gerekiyor.",
+        "NSPhotoLibraryAddUsageDescription": "Çektiğin videoları galeriye kaydetmek için.",
+        "UIRequiresFullScreen": true
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
