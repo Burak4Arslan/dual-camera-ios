@@ -9,6 +9,13 @@ import { LANGUAGE_NAMES, LANGUAGES } from '../i18n/strings';
 import { Settings, useSettings } from '../settings';
 
 const LANGUAGE_OPTIONS: Settings['language'][] = ['system', ...LANGUAGES];
+const LAYOUT_OPTIONS: Settings['layout'][] = ['pip', 'split', 'cutout'];
+
+const LAYOUT_TEXT = {
+  pip: ['layoutPip', 'layoutPipHint'],
+  split: ['layoutSplit', 'layoutSplitHint'],
+  cutout: ['layoutCutout', 'layoutCutoutHint'],
+} as const;
 
 export default function SettingsScreen() {
   const s = useStrings();
@@ -65,6 +72,75 @@ export default function SettingsScreen() {
             value={settings.shutterEffect}
             onValueChange={(shutterEffect) => settings.update({ shutterEffect })}
           />
+        </View>
+        <View style={[styles.row, styles.rowBorder]}>
+          <View style={styles.rowLabel}>
+            <Text style={styles.rowText}>{s.settings.volumeButtons}</Text>
+            <Text style={styles.hint}>{s.settings.volumeButtonsHint}</Text>
+          </View>
+          <Switch
+            value={settings.volumeButtons}
+            onValueChange={(volumeButtons) => settings.update({ volumeButtons })}
+          />
+        </View>
+        <View style={[styles.row, styles.rowBorder]}>
+          <View style={styles.rowLabel}>
+            <Text style={styles.rowText}>{s.settings.eyeContact}</Text>
+            <Text style={styles.hint}>{s.settings.eyeContactHint}</Text>
+          </View>
+          <Switch value={settings.eyeContact} onValueChange={(eyeContact) => settings.update({ eyeContact })} />
+        </View>
+      </View>
+
+      <Text style={styles.sectionTitle}>{s.settings.dual}</Text>
+      <View style={styles.section}>
+        {LAYOUT_OPTIONS.map((layout, i) => (
+          <Pressable
+            key={layout}
+            style={[styles.row, i > 0 && styles.rowBorder]}
+            // Sahneye yerleştir yalnızca tek videoyla anlamlı; seçilince tek video da açılır.
+            onPress={() => settings.update(layout === 'cutout' ? { layout, combineVideo: true } : { layout })}
+          >
+            <View style={styles.rowLabel}>
+              <Text style={styles.rowText}>{s.settings[LAYOUT_TEXT[layout][0]]}</Text>
+              <Text style={styles.hint}>{s.settings[LAYOUT_TEXT[layout][1]]}</Text>
+            </View>
+            {settings.layout === layout && <Text style={styles.check}>✓</Text>}
+          </Pressable>
+        ))}
+        <View style={[styles.row, styles.rowBorder]}>
+          <View style={styles.rowLabel}>
+            <Text style={styles.rowText}>{s.settings.combineVideo}</Text>
+            <Text style={styles.hint}>
+              {settings.layout === 'cutout' ? s.settings.combineVideoLocked : s.settings.combineVideoHint}
+            </Text>
+          </View>
+          <Switch
+            value={settings.combineVideo || settings.layout === 'cutout'}
+            disabled={settings.layout === 'cutout'}
+            onValueChange={(combineVideo) => settings.update({ combineVideo })}
+          />
+        </View>
+      </View>
+
+      <Text style={styles.sectionTitle}>{s.settings.video}</Text>
+      <View style={styles.section}>
+        <View style={styles.row}>
+          <View style={styles.rowLabel}>
+            <Text style={styles.rowText}>{s.settings.noiseReduction}</Text>
+            <Text style={styles.hint}>{s.settings.noiseReductionHint}</Text>
+          </View>
+          <Switch
+            value={settings.noiseReduction}
+            onValueChange={(noiseReduction) => settings.update({ noiseReduction })}
+          />
+        </View>
+        <View style={[styles.row, styles.rowBorder]}>
+          <View style={styles.rowLabel}>
+            <Text style={styles.rowText}>{s.settings.dimScreen}</Text>
+            <Text style={styles.hint}>{s.settings.dimScreenHint}</Text>
+          </View>
+          <Switch value={settings.dimScreen} onValueChange={(dimScreen) => settings.update({ dimScreen })} />
         </View>
       </View>
 

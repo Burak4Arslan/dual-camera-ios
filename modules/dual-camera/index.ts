@@ -15,7 +15,10 @@ type AutoStopped = { saved: boolean; duration?: number; files?: number } & Parti
 export type DualCameraRef = {
   startRecording(): Promise<void>;
   stopRecording(): Promise<RecordingResult>;
-  /** Yalnızca `captureMode="photo"` iken. */
+  /** Dosya açık kalır; duraklatılan süre videoda yer almaz. */
+  pauseRecording(): Promise<void>;
+  resumeRecording(): Promise<void>;
+  /** Foto modunda ya da video kaydı sürerken (o zaman deklanşör sesi, destekleniyorsa, çıkmaz). */
   takePhoto(): Promise<PhotoResult>;
 };
 
@@ -29,20 +32,69 @@ export type DualCameraViewProps = ViewProps & {
   ref?: Ref<DualCameraRef>;
   cameras?: CameraMode;
   captureMode?: CaptureMode;
+  /** Tam ekrandaki kameranın yakınlaştırması (1 = geniş açı lens, 0,5 = ultra geniş, en fazla 10). */
+  zoom?: number;
+  /** `both` kaydında tek video (yüz sahnenin köşesinde); yoksa iki ayrı dosya. Sonraki kayıtta geçerli. */
+  combine?: boolean;
+  /** Yüz penceresinin yeri (merkezinin kareye oranı, 0–1); verilmezse sağ üst köşe. */
+  pipPosition?: PipPosition;
+  /** Kullanıcı yüz penceresini sürükleyip bıraktığında yeni yeri. */
+  onPipMove?: (e: NativeSyntheticEvent<PipPosition>) => void;
+  /** Ön+Arka düzeni (önizleme ve tek video): küçük pencere, bölünmüş ekran ya da sahneye yerleştir
+   * (kişi arka planı silinmiş olarak sahnenin üstünde; yalnızca tek videoyla). */
+  layout?: DualLayout;
+  /** Ses tuşlarıyla çekim (iOS 17.2+). Kapalıyken tuşlar sesi değiştirir. */
+  hardwareButtons?: boolean;
+  /** Ses kısma `primary`, ses açma `secondary`. */
+  onHardwareButton?: (e: NativeSyntheticEvent<{ button: 'primary' | 'secondary' }>) => void;
+  /** Kaydedilen sesteki sürekli hışırtıyı temizle (spektral gürültü azaltma). Sonraki kayıtta geçerli. */
+  noiseReduction?: boolean;
+  /** Önizlemenin boyutu (1 = tam). Ön ışıkta küçülür, etrafı beyaz kalır; kayda etkisi yok. */
+  previewScale?: number;
+  /** Göz teması penceresinin ekrandaki yeri (pt); verilmezse gizli. Yalnızca ekranda, kaydedilmez. */
+  miniPreviewFrame?: { x: number; y: number; width: number; height: number };
+  /** Ekranın gerçek yönü değişince (yatay sol ↔ sağ dahil; o dönüşte boyut değişmez). */
+  onOrientationChange?: (e: NativeSyntheticEvent<{ orientation: InterfaceOrientation }>) => void;
   /** Arka kameranın ışığı (video için sürekli yanar). `front` modunda yanmaz. */
   torch?: boolean;
   onReady?: () => void;
   onMicChange?: (e: NativeSyntheticEvent<MicInfo>) => void;
   onCameraError?: (e: NativeSyntheticEvent<CameraError>) => void;
   onAutoStopped?: (e: NativeSyntheticEvent<AutoStopped>) => void;
+  /** Tam ekrandaki kameranın yakınlaştırma aralığı; `min` 0,5 ise ultra geniş lens var. */
+  onZoomRange?: (e: NativeSyntheticEvent<ZoomRange>) => void;
+  /** Mikrofonun ses düzeyi (dB; 0 en yüksek, -50 altı sessiz), saniyede ~10 kez. Yalnızca video modunda. */
+  onAudioLevel?: (e: NativeSyntheticEvent<{ db: number }>) => void;
 };
+
+export type ZoomRange = { min: number; max: number };
+export type PipPosition = { x: number; y: number };
+export type DualLayout = 'pip' | 'split' | 'cutout';
+export type ScreenBrightness = 'normal' | 'dim' | 'max';
+
+/** Arayüzün (ekranın) gerçek yönü; yatayda sol/sağ, UIKit'teki adlarıyla. */
+export type InterfaceOrientation =
+  | 'portrait'
+  | 'portraitUpsideDown'
+  | 'landscapeLeft'
+  | 'landscapeRight'
+  | 'unknown';
 
 const DualCameraModule = requireNativeModule<{
   isSupported(): boolean;
   requestPermissions(): Promise<{ camera: boolean; microphone: boolean }>;
+  getInterfaceOrientation(): Promise<InterfaceOrientation>;
+  setScreenBrightness(level: ScreenBrightness): Promise<void>;
+  getFreeSpace(): Promise<number>;
 }>('DualCamera');
 
 export const isSupported = () => DualCameraModule.isSupported();
 export const requestPermissions = () => DualCameraModule.requestPermissions();
+export const getInterfaceOrientation = () => DualCameraModule.getInterfaceOrientation();
+/** Ekran parlaklığı: loş (uzun çekimde pil), tam (ön ışık) ya da kullanıcının ayarı. */
+export const setScreenBrightness = (level: ScreenBrightness) => DualCameraModule.setScreenBrightness(level);
+
+/** Kullanılabilir alan (bayt); kalan kayıt süresi tahmini için. */
+export const getFreeSpace = () => DualCameraModule.getFreeSpace();
 
 export const DualCameraView: ComponentType<DualCameraViewProps> = requireNativeView('DualCamera');

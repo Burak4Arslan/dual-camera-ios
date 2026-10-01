@@ -1,24 +1,39 @@
 import AVFoundation
+import AVKit
+import Accelerate
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import ExpoModulesCore
 import Photos
 import UIKit
+import Vision
 
 // Önizlemede arka kamera tam kare, ön kamera (yüz) sağ üst köşede küçük pencere.
-// Kayıtta ise iki kamera iki ayrı video dosyası olur (kurguda yerleştirmek için).
+// Kayıtta iki kamera iki ayrı video dosyası olur (kurguda yerleştirmek için); ayarlarda
+// "tek video" seçiliyse yüz, önizlemedeki gibi sahnenin köşesine yerleştirilip tek dosya yazılır.
 private enum Pip {
   static let longSideRatio: CGFloat = 0.28 // karenin uzun kenarına oranla
   static let marginRatio: CGFloat = 0.045  // karenin kısa kenarına oranla
   static let cornerRatio: CGFloat = 0.06   // pencerenin uzun kenarına oranla
   static let borderRatio: CGFloat = 0.004  // karenin kısa kenarına oranla
+  /// "Sahneye yerleştir"de kesilmiş kişi pencereden bu kadar büyük (çerçevesi yok, etrafı saydam).
+  static let cutoutScale: CGFloat = 1.6
 
-  /// Kare içinde pencerenin yeri; y yukarıdan aşağı ölçülür (UIKit düzeni).
-  static func rect(in frame: CGSize) -> CGRect {
-    let long = max(frame.width, frame.height) * longSideRatio
+  /// Kare içinde pencerenin yeri; y yukarıdan aşağı ölçülür (UIKit düzeni). `center` pencere
+  /// merkezinin kareye oranı (0–1, kullanıcı sürükleyerek seçer); nil ise sağ üst köşe.
+  /// Pencere her zaman kenar boşluğu bırakarak karenin içinde kalır.
+  static func rect(in frame: CGSize, center: CGPoint?, scale: CGFloat = 1) -> CGRect {
+    let long = max(frame.width, frame.height) * longSideRatio * scale
     let size = frame.width >= frame.height
       ? CGSize(width: long, height: long * 9 / 16)
       : CGSize(width: long * 9 / 16, height: long)
     let margin = min(frame.width, frame.height) * marginRatio
-    return CGRect(x: frame.width - margin - size.width, y: margin, width: size.width, height: size.height)
+    guard let center else {
+      return CGRect(x: frame.width - margin - size.width, y: margin, width: size.width, height: size.height)
+    }
+    let x = min(max(center.x * frame.width - size.width / 2, margin), frame.width - margin - size.width)
+    let y = min(max(center.y * frame.height - size.height / 2, margin), frame.height - margin - size.height)
+    return CGRect(x: x, y: y, width: size.width, height: size.height)
   }
 }
 
@@ -83,14 +98,18 @@ extension Error {
 /// Tek bir kameranın video dosyası (görüntü + varsa mikrofon sesi).
 private final class Track {
   let url: URL
+  /// Kareler `PipCompositor` ile birleştirilip piksel tamponu olarak yazılır (tek video).
+  let composited: Bool
   private(set) var writer: AVAssetWriter?
   private var videoInput: AVAssetWriterInput?
+  private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
   private var audioInput: AVAssetWriterInput?
   private(set) var lastVideoTime: CMTime?
 
-  init(name: String) {
+  init(name: String, composited: Bool = false) {
     url = FileManager.default.temporaryDirectory
       .appendingPathComponent("dualcam-\(name)-\(UUID().uuidString).mov")
+    self.composited = composited
   }
 
   var isWriting: Bool { writer?.status == .writing }
@@ -99,11 +118,13 @@ private final class Track {
   func start(firstFrame: CMSampleBuffer, at start: CMTime, audioSettings: [String: Any]?) throws {
     guard let image = CMSampleBufferGetImageBuffer(firstFrame) else { throw DualCameraError.tooShort }
     let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+    let width = CVPixelBufferGetWidth(image)
+    let height = CVPixelBufferGetHeight(image)
 
     let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
       AVVideoCodecKey: AVVideoCodecType.hevc,
-      AVVideoWidthKey: CVPixelBufferGetWidth(image),
-      AVVideoHeightKey: CVPixelBufferGetHeight(image),
+      AVVideoWidthKey: width,
+      AVVideoHeightKey: height,
       AVVideoCompressionPropertiesKey: [
         AVVideoAverageBitRateKey: 16_000_000,
         AVVideoExpectedSourceFrameRateKey: 30,
@@ -111,6 +132,14 @@ private final class Track {
     ])
     videoInput.expectsMediaDataInRealTime = true
     writer.add(videoInput)
+    if composited {
+      adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput, sourcePixelBufferAttributes: [
+        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+        kCVPixelBufferWidthKey as String: width,
+        kCVPixelBufferHeightKey as String: height,
+        kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+      ])
+    }
 
     // Mikrofon izni yoksa ses ayarı da yoktur; video sessiz kaydedilir.
     if let audioSettings {
@@ -135,6 +164,40 @@ private final class Track {
     guard isWriting, let input = videoInput, input.isReadyForMoreMediaData else { return }
     if input.append(sampleBuffer) {
       lastVideoTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    }
+  }
+
+  /// Tek video: sahne karesiyle yüzün son karesi, önizlemedeki düzenle birleştirilip yazılır.
+  func appendVideo(
+    _ sampleBuffer: CMSampleBuffer, face: CVPixelBuffer?, mask: CVPixelBuffer?, layout: CompositeLayout,
+    compositor: PipCompositor
+  ) {
+    appendRendered(sampleBuffer) { scene, output in
+      compositor.render(scene: scene, face: face, mask: mask, layout: layout, into: output)
+    }
+  }
+
+  /// Tek kamera: o an açık kameranın karesi (kayıtta kamera çevrilebilir) dosyanın boyutuna oturtulur.
+  func appendVideo(_ sampleBuffer: CMSampleBuffer, compositor: PipCompositor) {
+    appendRendered(sampleBuffer) { frame, output in
+      compositor.render(single: frame, into: output)
+    }
+  }
+
+  /// `render` kaynak kareyi yazıcının havuzundan alınan çıkış tamponuna çizer.
+  private func appendRendered(_ sampleBuffer: CMSampleBuffer, render: (CVPixelBuffer, CVPixelBuffer) -> Void) {
+    guard isWriting, let input = videoInput, input.isReadyForMoreMediaData,
+      let adaptor, let pool = adaptor.pixelBufferPool,
+      let source = CMSampleBufferGetImageBuffer(sampleBuffer)
+    else { return }
+    let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    // Kamera çevrilirken iki kameranın kareleri karışabilir; zaman geri gidemez.
+    if let last = lastVideoTime, CMTimeCompare(time, last) <= 0 { return }
+    var output: CVPixelBuffer?
+    guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &output) == kCVReturnSuccess, let output else { return }
+    render(source, output)
+    if adaptor.append(output, withPresentationTime: time) {
+      lastVideoTime = time
     }
   }
 
@@ -183,9 +246,43 @@ enum CaptureKind: String {
   case video, photo
 }
 
+extension UIInterfaceOrientation {
+  /// JS tarafındaki ad (InterfaceOrientation).
+  var jsName: String {
+    switch self {
+    case .landscapeLeft: return "landscapeLeft"
+    case .landscapeRight: return "landscapeRight"
+    case .portraitUpsideDown: return "portraitUpsideDown"
+    case .portrait: return "portrait"
+    default: return "unknown"
+    }
+  }
+}
+
+/// Ön+Arka'da iki kameranın ekrandaki ve tek videodaki yerleşimi.
+enum DualLayout: String {
+  /// Biri tam kare, diğeri küçük pencerede.
+  case pip
+  /// Yatayda yan yana, dikeyde üst üste iki yarı.
+  case split
+  /// Sahneye yerleştir: arka kamera tam kare, ön kameradaki kişi arka planı silinmiş olarak üstünde
+  /// (çerçevesiz). Yalnızca tek videoyla anlamlı.
+  case cutout
+}
+
+/// Tek videonun düzeni: önizlemedekiyle aynı (dataQueue'ya kopyalanır).
+private struct CompositeLayout: Equatable {
+  var layout: DualLayout = .pip
+  /// Yüz büyük (pencerede ya da ilk yarıda), sahne küçük.
+  var swapped = false
+  /// Pencerenin yeri (merkezinin kareye oranı); nil = sağ üst köşe.
+  var pip: CGPoint?
+}
+
 /// Bir kameranın oturumdaki bağlantıları.
 private struct CameraLinks {
   let device: AVCaptureDevice
+  let input: AVCaptureDeviceInput
   let video: AVCaptureConnection // kayıt kareleri
   let photo: AVCaptureConnection
   let preview: AVCaptureConnection
@@ -242,14 +339,429 @@ private final class PhotoShot: NSObject, AVCapturePhotoCaptureDelegate {
   }
 }
 
+/// Ön+Arka tek video: iki kamerayı önizlemedeki düzenle tek kareye yerleştirir. Pencere düzeninde
+/// küçük kamera, önizlemedeki pencerenin yerine ve biçimiyle (yuvarlak köşe, beyaz çerçeve);
+/// bölünmüş düzende iki yarı. Yalnızca dataQueue üzerinde kullanılır.
+private final class PipCompositor {
+  private let context = CIContext(options: [.cacheIntermediates: false])
+  // Kare boyutu ve pencerenin yeri değişmedikçe aynı kalan parçalar.
+  private var frameSize: CGSize = .zero
+  private var framePip: CGPoint?
+  private var inner: CGRect = .zero
+  private var border = CIImage.empty()
+  private var mask = CIImage.empty()
+
+  /// Çıkış karesi sahne karesiyle aynı boyuttadır. Yüz karesi henüz gelmediyse yalnızca sahne.
+  /// `mask`: "sahneye yerleştir"de `face` karesindeki kişinin maskesi (yoksa yalnızca sahne).
+  func render(
+    scene: CVPixelBuffer, face: CVPixelBuffer?, mask personMask: CVPixelBuffer?, layout: CompositeLayout,
+    into output: CVPixelBuffer
+  ) {
+    let sceneImage = CIImage(cvPixelBuffer: scene)
+    let frame = sceneImage.extent
+    var image = sceneImage
+    if let face {
+      let faceImage = CIImage(cvPixelBuffer: face)
+      let (big, small) = layout.swapped ? (faceImage, sceneImage) : (sceneImage, faceImage)
+      switch layout.layout {
+      case .cutout:
+        // Sahne tam kare; kişi arka planı silinmiş, çerçevesiz, pencerenin yerinde ve daha büyük.
+        if let personMask {
+          let r = Pip.rect(in: frame.size, center: layout.pip, scale: Pip.cutoutScale)
+          let rect = CGRect(x: r.minX, y: frame.height - r.maxY, width: r.width, height: r.height)
+          image = Self.fill(Self.cutout(faceImage, mask: personMask), into: rect).composited(over: sceneImage)
+        }
+      case .split:
+        // Yatayda yan yana, dikeyde üst üste (Core Image'da y yukarı: üst yarı maxY tarafı).
+        let (first, second) = frame.width >= frame.height
+          ? frame.divided(atDistance: frame.width / 2, from: .minXEdge)
+          : frame.divided(atDistance: frame.height / 2, from: .maxYEdge)
+        image = Self.fill(big, into: first).composited(over: Self.fill(small, into: second))
+      case .pip:
+        prepare(for: frame.size, pip: layout.pip)
+        let rounded = Self.fill(small, into: inner).applyingFilter("CIBlendWithMask", parameters: [
+          kCIInputBackgroundImageKey: CIImage.empty(),
+          kCIInputMaskImageKey: mask,
+        ])
+        image = rounded.composited(over: border.composited(over: Self.fill(big, into: frame)))
+      }
+    }
+    context.render(image.cropped(to: frame), to: output)
+  }
+
+  /// Kişiyi arka planından ayırır: maske kareye ölçeklenir, kenarları hafifçe yumuşatılır; kişinin
+  /// dışı saydam kalır.
+  static func cutout(_ face: CIImage, mask: CVPixelBuffer) -> CIImage {
+    let maskImage = CIImage(cvPixelBuffer: mask)
+    let scaled = maskImage
+      .transformed(by: CGAffineTransform(
+        scaleX: face.extent.width / maskImage.extent.width, y: face.extent.height / maskImage.extent.height))
+      .clampedToExtent()
+      .applyingGaussianBlur(sigma: 2)
+      .cropped(to: face.extent)
+    return face.applyingFilter("CIBlendWithMask", parameters: [
+      kCIInputBackgroundImageKey: CIImage.empty(),
+      kCIInputMaskImageKey: scaled,
+    ])
+  }
+
+  /// Tek kamera kaydı: kare, çıkış karesini dolduracak şekilde (çevrilen kameranın boyutu farklı
+  /// olabilir) yazılır.
+  func render(single: CVPixelBuffer, into output: CVPixelBuffer) {
+    let frame = CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(output), height: CVPixelBufferGetHeight(output))
+    context.render(Self.fill(CIImage(cvPixelBuffer: single), into: frame), to: output)
+  }
+
+  /// Görüntüyü alanı dolduracak kadar büyütür, ortalar, taşanı kırpar.
+  static func fill(_ image: CIImage, into rect: CGRect) -> CIImage {
+    let scale = max(rect.width / image.extent.width, rect.height / image.extent.height)
+    let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    return scaled
+      .transformed(by: CGAffineTransform(translationX: rect.midX - scaled.extent.midX, y: rect.midY - scaled.extent.midY))
+      .cropped(to: rect)
+  }
+
+  private func prepare(for size: CGSize, pip: CGPoint?) {
+    guard size != frameSize || pip != framePip else { return }
+    frameSize = size
+    framePip = pip
+    // Pip.rect UIKit düzeninde (y aşağı); Core Image'da y yukarı.
+    let r = Pip.rect(in: size, center: pip)
+    let outer = CGRect(x: r.minX, y: size.height - r.maxY, width: r.width, height: r.height)
+    let radius = max(outer.width, outer.height) * Pip.cornerRatio
+    let borderWidth = max(1, min(size.width, size.height) * Pip.borderRatio)
+    inner = outer.insetBy(dx: borderWidth, dy: borderWidth)
+    border = roundedRect(outer, radius: radius)
+    mask = roundedRect(inner, radius: max(radius - borderWidth, 0))
+  }
+
+  private func roundedRect(_ rect: CGRect, radius: CGFloat) -> CIImage {
+    let generator = CIFilter.roundedRectangleGenerator()
+    generator.extent = rect
+    generator.radius = Float(radius)
+    generator.color = .white
+    return generator.outputImage ?? .empty()
+  }
+}
+
+/// Hışırtı azaltma (spektral çıkarma). Sesi ~21 ms'lik, yarı yarıya örtüşen parçalara bölüp her
+/// frekansta sürekli olan gürültüyü (mikrofonun ya da kablosuz alıcının hışırtısı) ölçer ve çıkarır;
+/// konuşma sürekli değiştiği için korunur. Sessizlikte de konuşurken de çalışır. 2 × `hop` örneklik
+/// gecikme, zaman damgası öne alınarak telafi edilir (dudak senkronu bozulmaz). Kamera açıkken
+/// sürekli çalışır; yalnızca dataQueue üzerinde.
+private final class NoiseReducer {
+  private static let log2n: vDSP_Length = 10
+  private static let size = 1024
+  private static let hop = 512
+  /// Yumuşatılmış gücün en düşük değeri ortalama gürültünün altında kalır; bu kadar büyütülür.
+  private static let bias: Float = 2
+  /// Gürültünün kaç katı çıkarılsın. Hışırtının anlık gücü rastgele dalgalanır; 2 katta tepelerin
+  /// ~%13ü geçip yalnızca ~9 dB azaltıyordu, 4 katta ~%2si geçer (~17 dB). Konuşma hışırtının
+  /// ~30 dB üstünde olduğu için etkilenmez.
+  private static let overSubtraction: Float = 4
+  /// Bir frekansın en fazla kısılacağı oran (~-24 dB); daha fazlası sesi "su altı" gibi yapar.
+  private static let floorGain: Float = 0.06
+
+  private final class Channel {
+    /// Henüz bir parçaya yetmeyen giriş.
+    var pending: [Float] = []
+    /// Son `size` örnek (işlenen parça).
+    var history = [Float](repeating: 0, count: NoiseReducer.size)
+    /// Örtüşen parçaların toplandığı yer.
+    var overlap = [Float](repeating: 0, count: NoiseReducer.size)
+    /// Çıkışa hazır örnekler; bir `hop` sıfırla başlar, böylece her girişe yetecek çıkış olur.
+    var ready = [Float](repeating: 0, count: NoiseReducer.hop)
+    /// Frekans başına güç, zaman içinde yumuşatılmış (~50 ms): hışırtının anlık dalgalanması
+    /// gürültü tahminini aşağı çekmesin.
+    var smooth = [Float](repeating: 0, count: NoiseReducer.size / 2 + 1)
+    /// Frekans başına gürültü gücü: yumuşatılmış güç daha düşükse hemen iner, yoksa yavaşça yükselir.
+    var noise = [Float](repeating: .greatestFiniteMagnitude, count: NoiseReducer.size / 2 + 1)
+    var gains = [Float](repeating: 1, count: NoiseReducer.size / 2 + 1)
+  }
+
+  private let fft: FFTSetup
+  /// Karekök Hann: analiz × sentez = Hann, yarı örtüşmede toplamı 1 (ses bozulmadan geri kurulur).
+  private let window: [Float]
+  private var channels: [Channel] = []
+  private var sampleRate: Double = 0
+
+  init?() {
+    guard let fft = vDSP_create_fftsetup(Self.log2n, FFTRadix(kFFTRadix2)) else { return nil }
+    self.fft = fft
+    let n = Self.size
+    window = (0..<n).map { (0.5 - 0.5 * cosf(2 * .pi * Float($0) / Float(n))).squareRoot() }
+  }
+
+  deinit {
+    vDSP_destroy_fftsetup(fft)
+  }
+
+  /// 16 bit ya da 32 bit float, iç içe (interleaved) LPCM; başka biçimde aynısını döner.
+  func process(_ buffer: CMSampleBuffer) -> CMSampleBuffer {
+    guard let format = CMSampleBufferGetFormatDescription(buffer),
+      let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee,
+      asbd.mFormatID == kAudioFormatLinearPCM,
+      asbd.mSampleRate > 0,
+      let source = CMSampleBufferGetDataBuffer(buffer)
+    else { return buffer }
+    let isFloat = asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
+    let bits = asbd.mBitsPerChannel
+    guard (isFloat && bits == 32) || (!isFloat && (bits == 16 || bits == 32)) else { return buffer }
+    // Kanallar iç içe (LRLR…) ya da art arda (LLL…RRR…) gelebilir.
+    let interleaved = asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0
+
+    let channelCount = max(Int(asbd.mChannelsPerFrame), 1)
+    if channels.count != channelCount || sampleRate != asbd.mSampleRate {
+      // Mikrofon değişti (ör. yaka mikrofonu takıldı): baştan ölç.
+      channels = (0..<channelCount).map { _ in Channel() }
+      sampleRate = asbd.mSampleRate
+    }
+
+    // Kameranın tamponu salt okunur olabilir; kopyası üzerinde çalış.
+    let length = CMBlockBufferGetDataLength(source)
+    var block: CMBlockBuffer?
+    guard CMBlockBufferCreateWithMemoryBlock(
+      allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: length, blockAllocator: kCFAllocatorDefault,
+      customBlockSource: nil, offsetToData: 0, dataLength: length, flags: kCMBlockBufferAssureMemoryNowFlag,
+      blockBufferOut: &block) == kCMBlockBufferNoErr, let block
+    else { return buffer }
+    var data: UnsafeMutablePointer<CChar>?
+    guard CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: nil, dataPointerOut: &data)
+      == kCMBlockBufferNoErr, let data,
+      CMBlockBufferCopyDataBytes(source, atOffset: 0, dataLength: length, destination: data) == kCMBlockBufferNoErr
+    else { return buffer }
+
+    let frames = CMSampleBufferGetNumSamples(buffer)
+    let total = frames * channelCount
+    guard total * Int(bits / 8) <= length else { return buffer }
+    let index: (Int, Int) -> Int = interleaved ? { f, c in f * channelCount + c } : { f, c in c * frames + f }
+    if isFloat {
+      data.withMemoryRebound(to: Float.self, capacity: total) {
+        run($0, frames: frames, index: index, read: { $0 }, write: { $0 })
+      }
+    } else if bits == 16 {
+      data.withMemoryRebound(to: Int16.self, capacity: total) {
+        run(
+          $0, frames: frames, index: index,
+          read: { Float($0) / 32768 }, write: { Int16(clamping: Int(($0 * 32767).rounded())) })
+      }
+    } else {
+      data.withMemoryRebound(to: Int32.self, capacity: total) {
+        run(
+          $0, frames: frames, index: index,
+          read: { Float($0) / 2_147_483_648 }, write: { Int32(clamping: Int64((Double($0) * 2_147_483_647).rounded())) })
+      }
+    }
+
+    // Çıkış girişten 2 × hop geride; zaman damgasını o kadar öne al.
+    let delay = CMTime(value: CMTimeValue(2 * Self.hop), timescale: CMTimeScale(asbd.mSampleRate))
+    var out: CMSampleBuffer?
+    guard CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+      allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format, sampleCount: frames,
+      presentationTimeStamp: CMTimeSubtract(CMSampleBufferGetPresentationTimeStamp(buffer), delay),
+      packetDescriptions: nil, sampleBufferOut: &out) == noErr, let out
+    else { return buffer }
+    return out
+  }
+
+  private func run<T>(
+    _ samples: UnsafeMutablePointer<T>, frames: Int, index: (Int, Int) -> Int,
+    read: (T) -> Float, write: (Float) -> T
+  ) {
+    // Gürültü tahmini (güç) saniyede ~3 dB yükselebilir.
+    let rise = powf(10, 3 / 10 * Float(Self.hop) / Float(sampleRate))
+    for (c, channel) in channels.enumerated() {
+      for f in 0..<frames {
+        channel.pending.append(read(samples[index(f, c)]))
+      }
+      while channel.pending.count >= Self.hop {
+        channel.history.removeFirst(Self.hop)
+        channel.history.append(contentsOf: channel.pending.prefix(Self.hop))
+        channel.pending.removeFirst(Self.hop)
+        processHop(channel, rise: rise)
+      }
+      for f in 0..<frames {
+        samples[index(f, c)] = write(channel.ready[f])
+      }
+      channel.ready.removeFirst(frames)
+    }
+  }
+
+  /// Bir parça: pencere → FFT → frekans başına kazanç → ters FFT → pencere → üst üste ekle.
+  private func processHop(_ channel: Channel, rise: Float) {
+    let n = Self.size
+    let half = n / 2
+    var windowed = [Float](repeating: 0, count: n)
+    vDSP_vmul(channel.history, 1, window, 1, &windowed, 1, vDSP_Length(n))
+
+    var real = [Float](repeating: 0, count: half)
+    var imag = [Float](repeating: 0, count: half)
+    var restored = [Float](repeating: 0, count: n)
+    real.withUnsafeMutableBufferPointer { realPointer in
+      imag.withUnsafeMutableBufferPointer { imagPointer in
+        var split = DSPSplitComplex(realp: realPointer.baseAddress!, imagp: imagPointer.baseAddress!)
+        windowed.withUnsafeBufferPointer {
+          $0.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: half) {
+            vDSP_ctoz($0, 2, &split, 1, vDSP_Length(half))
+          }
+        }
+        vDSP_fft_zrip(fft, &split, 1, Self.log2n, FFTDirection(FFT_FORWARD))
+
+        // Paketli biçim: realp[0] = 0 Hz, imagp[0] = en yüksek frekans; diğerleri karmaşık.
+        for k in 0...half {
+          let re = k == 0 ? split.realp[0] : k == half ? split.imagp[0] : split.realp[k]
+          let im = k == 0 || k == half ? 0 : split.imagp[k]
+          let power = re * re + im * im
+          let smoothed = channel.smooth[k] == 0 ? power : channel.smooth[k] * 0.8 + power * 0.2
+          channel.smooth[k] = smoothed
+          channel.noise[k] = smoothed < channel.noise[k] ? smoothed : channel.noise[k] * rise
+          // Güç oranından kazanç; en fazla `floorGain` kadar kısılır.
+          let noise = Self.bias * Self.overSubtraction * channel.noise[k]
+          let target = max(1 - noise / max(power, 1e-12), Self.floorGain * Self.floorGain).squareRoot()
+          // Açılış hızlı (konuşma başı kesilmesin), kapanış yumuşak ("cıvıltı" olmasın).
+          let previous = channel.gains[k]
+          let gain = previous + (target - previous) * (target > previous ? 0.8 : 0.35)
+          channel.gains[k] = gain
+          if k == 0 {
+            split.realp[0] *= gain
+          } else if k == half {
+            split.imagp[0] *= gain
+          } else {
+            split.realp[k] *= gain
+            split.imagp[k] *= gain
+          }
+        }
+
+        vDSP_fft_zrip(fft, &split, 1, Self.log2n, FFTDirection(FFT_INVERSE))
+        restored.withUnsafeMutableBufferPointer {
+          $0.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: half) {
+            vDSP_ztoc(&split, 1, $0, 2, vDSP_Length(half))
+          }
+        }
+      }
+    }
+
+    // İleri + geri FFT 2n katı büyütür; sentez penceresiyle çarp ve üst üste ekle.
+    var scale = 1 / Float(2 * n)
+    var scaled = [Float](repeating: 0, count: n)
+    vDSP_vsmul(restored, 1, &scale, &scaled, 1, vDSP_Length(n))
+    var synthesized = [Float](repeating: 0, count: n)
+    vDSP_vmul(scaled, 1, window, 1, &synthesized, 1, vDSP_Length(n))
+    var summed = [Float](repeating: 0, count: n)
+    vDSP_vadd(channel.overlap, 1, synthesized, 1, &summed, 1, vDSP_Length(n))
+
+    channel.ready.append(contentsOf: summed[0..<Self.hop])
+    channel.overlap = Array(summed[Self.hop...]) + [Float](repeating: 0, count: Self.hop)
+  }
+}
+
+/// Ön kameradaki kişiyi arka plandan ayırır (Vision). Kare ve maskesi birlikte saklanır; hem önizleme
+/// hem tek video kullanır. Meşgulken gelen kare atlanır, kamera akışı yavaşlamaz.
+private final class PersonSegmenter {
+  private let queue = DispatchQueue(label: "dualcam.segment")
+  private let request: VNGeneratePersonSegmentationRequest = {
+    let request = VNGeneratePersonSegmentationRequest()
+    request.qualityLevel = .balanced
+    request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+    return request
+  }()
+  // Yalnızca dataQueue üzerinde kullanılır.
+  private var busy = false
+  /// Son kare ve kişinin maskesi.
+  var latest: (face: CVPixelBuffer, mask: CVPixelBuffer)?
+
+  /// dataQueue üzerinde çağrılır; `done` da dataQueue üzerinde, yeni maske hazır olunca.
+  func submit(_ frame: CVPixelBuffer, on dataQueue: DispatchQueue, done: @escaping () -> Void) {
+    guard !busy else { return }
+    busy = true
+    queue.async { [self] in
+      let handler = VNImageRequestHandler(cvPixelBuffer: frame, orientation: .up)
+      let mask = (try? handler.perform([request])) != nil ? request.results?.first?.pixelBuffer : nil
+      dataQueue.async { [self] in
+        busy = false
+        guard let mask else { return }
+        latest = (frame, mask)
+        done()
+      }
+    }
+  }
+}
+
 private final class Recorder {
+  enum Style {
+    /// Ön+Arka, iki ayrı dosya: sahne `back`te, yüz `front`ta.
+    case separate
+    /// Ön+Arka, tek dosya (`back`): yüz ayrı yazılmaz, son karesi sahneyle birleştirilir.
+    case combined
+    /// Tek kamera, tek dosya (`back`): kayıt sırasında kamera çevrilebilir; `source` hangi
+    /// kameranın yazıldığını söyler.
+    case single
+  }
+
+  let style: Style
   let back: Track?
   let front: Track?
+  let compositor: PipCompositor?
+  var latestFace: CVPixelBuffer?
+  /// Tek kamerada yazılan kamera. Çevrilince yeni kameranın ilk karesi gelene kadar eskisi yazılır
+  /// (`pendingSource`), videoda boşluk olmaz.
+  var source: CameraMode
+  var pendingSource: CameraMode?
   var startTime: CMTime?
+  /// Duraklatma: `paused` iken gelen ilk örneğin zamanı `pauseStart` olur; devam edince aradaki
+  /// süre `offset`e eklenir ve sonraki örneklerin zamanından düşülür (video kesintisiz tek parça).
+  var paused = false
+  var pauseStart: CMTime?
+  var offset = CMTime.zero
 
-  init(mode: CameraMode) {
-    back = mode.usesBack ? Track(name: "sahne") : nil
-    front = mode.usesFront ? Track(name: "yuz") : nil
+  /// Duraklatmalarda geçen süre düşülmüş kopya; hiç duraklatılmadıysa aynısı.
+  func retimed(_ buffer: CMSampleBuffer) -> CMSampleBuffer {
+    guard offset != .zero else { return buffer }
+    var count: CMItemCount = 0
+    CMSampleBufferGetSampleTimingInfoArray(buffer, entryCount: 0, arrayToFill: nil, entriesNeededOut: &count)
+    var timing = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: count)
+    CMSampleBufferGetSampleTimingInfoArray(buffer, entryCount: count, arrayToFill: &timing, entriesNeededOut: &count)
+    for i in timing.indices {
+      timing[i].presentationTimeStamp = CMTimeSubtract(timing[i].presentationTimeStamp, offset)
+      if timing[i].decodeTimeStamp.isValid {
+        timing[i].decodeTimeStamp = CMTimeSubtract(timing[i].decodeTimeStamp, offset)
+      }
+    }
+    var copy: CMSampleBuffer?
+    CMSampleBufferCreateCopyWithNewTiming(
+      allocator: nil, sampleBuffer: buffer, sampleTimingEntryCount: count, sampleTimingArray: &timing,
+      sampleBufferOut: &copy)
+    return copy ?? buffer
+  }
+
+  init(mode: CameraMode, combine: Bool) {
+    source = mode
+    switch mode {
+    case .both where combine:
+      style = .combined
+      back = Track(name: "ikili", composited: true)
+      front = nil
+      compositor = PipCompositor()
+    case .both:
+      style = .separate
+      back = Track(name: "sahne")
+      front = Track(name: "yuz")
+      compositor = nil
+    case .back, .front:
+      style = .single
+      back = Track(name: "tek", composited: true)
+      front = nil
+      compositor = PipCompositor()
+    }
+  }
+
+  /// Tek kamerada karenin yazılıp yazılmayacağı; yeni kameranın ilk karesiyle geçiş tamamlanır.
+  func accepts(_ camera: CameraMode) -> Bool {
+    if let pending = pendingSource, camera == pending {
+      source = pending
+      pendingSource = nil
+    }
+    return camera == source
   }
 
   /// Galeriye kayıt sırası: önce sahne, sonra yüz.
@@ -267,6 +779,11 @@ final class DualCameraView: ExpoView,
   let onMicChange = EventDispatcher()
   let onCameraError = EventDispatcher()
   let onAutoStopped = EventDispatcher()
+  let onZoomRange = EventDispatcher()
+  let onAudioLevel = EventDispatcher()
+  let onPipMove = EventDispatcher()
+  let onHardwareButton = EventDispatcher()
+  let onOrientationChange = EventDispatcher()
 
   private let session = AVCaptureMultiCamSession()
   private let sessionQueue = DispatchQueue(label: "dualcam.session")
@@ -274,7 +791,20 @@ final class DualCameraView: ExpoView,
 
   private let backPreview = AVCaptureVideoPreviewLayer()
   private let frontPreview = AVCaptureVideoPreviewLayer()
-  private let frontContainer = UIView()
+  /// Tam kare (bölünmüş düzende bir yarı) ve küçük pencere (bölünmüşte diğer yarı). Hangi kameranın
+  /// hangisinde olduğunu `swapped` belirler; önizleme katmanları kaplar arasında taşınır.
+  private let mainContainer = UIView()
+  private let pipContainer = UIView()
+  /// Göz teması penceresi: ön kameranın lensin hemen yanındaki küçük kopyası. Yalnızca ekranda,
+  /// kayda girmez. Çift kamera oturumu aynı kameraya ikinci önizleme bağlamaya izin vermediği için
+  /// ön kameranın video kareleriyle beslenir. Yerini ve boyutunu JS verir.
+  private let miniDisplay = AVSampleBufferDisplayLayer()
+  /// "Sahneye yerleştir" önizlemesi: kesilmiş kişi (ayna), pencere kabının içinde, etrafı saydam.
+  private let cutoutLayer = CALayer()
+  private let miniContainer = UIView()
+  private var miniFrame: CGRect?
+  /// Ön ışık açıkken önizleme küçülür (kenarlar beyaz kalır); 1 = tam boy. Kayda etkisi yok.
+  private var previewScale: CGFloat = 1
 
   private let backOutput = AVCaptureVideoDataOutput()
   private let frontOutput = AVCaptureVideoDataOutput()
@@ -291,33 +821,87 @@ final class DualCameraView: ExpoView,
   private var activeMode: CameraMode = .both
   private var activeKind: CaptureKind = .video
   private var torchWanted = false
+  private var zoomWanted: CGFloat = 1
+  private let maxZoom: CGFloat = 10
   private var shots = Set<PhotoShot>() // çekimi süren fotolar (çıkış yalnızca zayıf tutar)
 
   // Ana thread üzerinde kullanılır.
   private var isRecording = false
+  private var combine = false
   private var isLandscape = false
   private var mode: CameraMode = .both
   private var kind: CaptureKind = .video
   /// Kameranın verdiği karenin yataydaki en/boy oranı: videoda 16:9, fotoda 4:3.
   private var frameRatio: CGFloat = 16 / 9
   private var geometryObservation: NSKeyValueObservation?
+  /// Ön+Arka düzeni: yüz küçük pencerede (`pip`) ya da ekran ikiye bölünmüş (`split`).
+  private var layout: DualLayout = .pip
+  /// Pencereye dokununca yer değiştirir: yüz büyük, sahne küçük.
+  private var swapped = false
+  /// Pencerenin yeri: merkezinin kareye oranı (0–1); nil = sağ üst köşe. Kullanıcı sürükler.
+  private var pipCenter: CGPoint?
+  /// Kaydedilen karenin ekrandaki yeri (son yerleşimden).
+  private var videoRect: CGRect = .zero
+  private lazy var pipPan = UIPanGestureRecognizer(target: self, action: #selector(pipPanned(_:)))
+  private lazy var pipTap = UITapGestureRecognizer(target: self, action: #selector(swapTapped))
+  private lazy var mainTap = UITapGestureRecognizer(target: self, action: #selector(swapTapped))
+  private var buttonInteraction: UIInteraction?
+  private var lastOrientationName: String?
 
   // Yalnızca dataQueue üzerinde kullanılır.
   private var recorder: Recorder?
+  private var lastLevelEmit: CFTimeInterval = 0
+  /// Göz teması penceresi görünüyor mu (ön kameranın kareleri ona da gider).
+  private var miniVisible = false
+  /// Hışırtı azaltma (ayardan açıksa); kayıt yokken de çalışıp hışırtıyı öğrenir.
+  private var denoiser: NoiseReducer?
+  /// Tek videonun düzeni; ana thread'deki düzen, yer değiştirme ve pencere yerinin kopyası.
+  private var recordingLayout = CompositeLayout()
+  /// "Sahneye yerleştir" açıkken ön kameranın kareleri kişi ayırıcıya gider.
+  private let segmenter = PersonSegmenter()
+  private var segmentationOn = false
+  /// Kesilmiş kişi önizlemesinin piksel boyutu (pencere kabının boyutu, en fazla ~720 px).
+  private var cutoutPreviewSize: CGSize = .zero
+  private let previewContext = CIContext(options: [.cacheIntermediates: false])
 
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
-    backgroundColor = .black
+    // Karenin dışı saydam: arkadaki ekran rengi görünür (normalde siyah, ön ışıkta beyaz).
+    backgroundColor = .clear
     clipsToBounds = true
 
-    backPreview.videoGravity = .resizeAspect
-    layer.addSublayer(backPreview)
-
-    frontPreview.videoGravity = .resizeAspectFill
-    frontContainer.layer.addSublayer(frontPreview)
-    frontContainer.clipsToBounds = true
-    frontContainer.layer.borderColor = UIColor.white.cgColor
-    addSubview(frontContainer)
+    // Kapların oranı karenin oranıyla aynı ya da yarısı; doldurmak yalnızca bölünmüşte kırpar.
+    for preview in [backPreview, frontPreview] {
+      preview.videoGravity = .resizeAspectFill
+    }
+    for container in [mainContainer, pipContainer] {
+      container.clipsToBounds = true
+      container.layer.borderColor = UIColor.white.cgColor
+      addSubview(container)
+    }
+    mainContainer.layer.addSublayer(backPreview)
+    pipContainer.layer.addSublayer(frontPreview)
+    pipContainer.addGestureRecognizer(pipPan)
+    pipContainer.addGestureRecognizer(pipTap)
+    mainContainer.addGestureRecognizer(mainTap)
+    miniContainer.clipsToBounds = true
+    miniContainer.layer.borderColor = UIColor.white.cgColor
+    miniContainer.layer.borderWidth = 1
+    miniContainer.layer.cornerRadius = 8
+    miniContainer.isHidden = true
+    miniContainer.isUserInteractionEnabled = false
+    miniDisplay.videoGravity = .resizeAspectFill
+    // Ana önizleme gibi ayna; kaydedilen kareler düz.
+    miniDisplay.setAffineTransform(CGAffineTransform(scaleX: -1, y: 1))
+    miniDisplay.controlTimebase = Self.hostTimebase()
+    miniContainer.layer.addSublayer(miniDisplay)
+    cutoutLayer.contentsGravity = .resizeAspectFill
+    cutoutLayer.isHidden = true
+    // Ön kamera önizlemesi gibi ayna; kaydedilen kare düz.
+    cutoutLayer.setAffineTransform(CGAffineTransform(scaleX: -1, y: 1))
+    pipContainer.layer.addSublayer(cutoutLayer)
+    addSubview(miniContainer)
+    addCaptureButtons()
 
     let nc = NotificationCenter.default
     nc.addObserver(self, selector: #selector(routeChanged),
@@ -338,38 +922,253 @@ final class DualCameraView: ExpoView,
 
   override func layoutSubviews() {
     super.layoutSubviews()
+    // Yatay sol ↔ sağ (180°) dönüşünde ekranın boyutu değişmez; JS gerçek yönü buradan öğrenir
+    // (tuşlar telefonun tutulduğu elin tarafına geçer).
+    if let name = window?.windowScene?.interfaceOrientation.jsName, name != lastOrientationName {
+      lastOrientationName = name
+      onOrientationChange(["orientation": name])
+    }
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     updateOrientation()
-    backPreview.frame = bounds
-    backPreview.isHidden = !mode.usesBack
-    frontContainer.isHidden = !mode.usesFront
 
     // Kaydedilen karenin (video 16:9, foto 4:3; dikeyde tersi) ekrandaki yeri.
     let aspect = isLandscape ? CGSize(width: frameRatio, height: 1) : CGSize(width: 1, height: frameRatio)
-    let vr = AVMakeRect(aspectRatio: aspect, insideRect: bounds)
-    if mode == .front {
-      // Sadece yüz: ön kamera tüm kareyi kaplar.
-      frontContainer.frame = vr
-      frontContainer.layer.cornerRadius = 0
-      frontContainer.layer.borderWidth = 0
+    let full = AVMakeRect(aspectRatio: aspect, insideRect: bounds)
+    let vr = full.insetBy(dx: full.width * (1 - previewScale) / 2, dy: full.height * (1 - previewScale) / 2)
+    videoRect = vr
+
+    // Tek kamerada o kamera tüm kareyi kaplar; Ön+Arka'da `swapped` hangisinin büyük olduğunu seçer.
+    let dual = mode == .both
+    // Sahneye yerleştirde yer değiştirme yok: sahne hep büyük, kişi kesilmiş olarak üstünde.
+    let cutout = dual && layout == .cutout
+    let (main, small) = (dual && swapped && !cutout) || mode == .front
+      ? (frontPreview, backPreview) : (backPreview, frontPreview)
+    if main.superlayer !== mainContainer.layer { mainContainer.layer.addSublayer(main) }
+    if small.superlayer !== pipContainer.layer { pipContainer.layer.insertSublayer(small, at: 0) }
+    pipContainer.isHidden = !dual
+    small.isHidden = cutout
+    cutoutLayer.isHidden = !cutout
+    pipPan.isEnabled = dual && layout != .split
+    pipTap.isEnabled = dual && !cutout
+    mainTap.isEnabled = dual && layout == .split
+
+    if dual && layout == .split {
+      // Yatayda yan yana, dikeyde üst üste; büyük kamera solda / üstte.
+      let (first, second) = isLandscape
+        ? vr.divided(atDistance: vr.width / 2, from: .minXEdge)
+        : vr.divided(atDistance: vr.height / 2, from: .minYEdge)
+      mainContainer.frame = first
+      pipContainer.frame = second
+      pipContainer.layer.cornerRadius = 0
+      pipContainer.layer.borderWidth = 0
     } else {
-      let pip = Pip.rect(in: vr.size).offsetBy(dx: vr.minX, dy: vr.minY)
-      frontContainer.frame = pip
-      frontContainer.layer.cornerRadius = max(pip.width, pip.height) * Pip.cornerRatio
-      frontContainer.layer.borderWidth = max(1, min(vr.width, vr.height) * Pip.borderRatio)
+      mainContainer.frame = vr
+      let scale = cutout ? Pip.cutoutScale : 1
+      let pip = Pip.rect(in: vr.size, center: pipCenter, scale: scale).offsetBy(dx: vr.minX, dy: vr.minY)
+      pipContainer.frame = pip
+      pipContainer.layer.cornerRadius = cutout ? 0 : max(pip.width, pip.height) * Pip.cornerRatio
+      pipContainer.layer.borderWidth = cutout ? 0 : max(1, min(vr.width, vr.height) * Pip.borderRatio)
     }
-    frontPreview.frame = frontContainer.bounds
+    main.frame = mainContainer.bounds
+    small.frame = pipContainer.bounds
+    cutoutLayer.frame = pipContainer.bounds
+    syncSegmentation(on: cutout, size: pipContainer.bounds.size)
+    miniContainer.isHidden = miniFrame == nil
+    if let miniFrame { miniContainer.frame = miniFrame }
+    miniDisplay.frame = miniContainer.bounds
     // Çerçeve aynı kalsa bile önizleme, görüntüyü yeni yöne göre yeniden yerleştirsin.
     backPreview.setNeedsLayout()
     frontPreview.setNeedsLayout()
     CATransaction.commit()
   }
 
-  /// JS'ten gelen kamera seçimi: "both", "back" ya da "front". Kayıt sırasında değişmez.
+  // MARK: - Göz teması penceresi
+
+  /// Kameranın zaman damgaları sistem saatine göre; kareler geldikleri anda gösterilsin.
+  private static func hostTimebase() -> CMTimebase? {
+    let clock = CMClockGetHostTimeClock()
+    var timebase: CMTimebase?
+    CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault, sourceClock: clock, timebaseOut: &timebase)
+    guard let timebase else { return nil }
+    CMTimebaseSetTime(timebase, time: CMClockGetTime(clock))
+    CMTimebaseSetRate(timebase, rate: 1)
+    return timebase
+  }
+
+  /// JS'ten: ön ışık açıkken önizleme bu oranda küçülür, etrafı beyaz kalır.
+  func setPreviewScale(_ scale: Double) {
+    let clamped = CGFloat(min(max(scale, 0.3), 1))
+    guard clamped != previewScale else { return }
+    previewScale = clamped
+    setNeedsLayout()
+  }
+
+  /// JS'ten: pencerenin ekrandaki yeri (lensin hemen yanı); nil = gizli.
+  func setMiniPreviewFrame(_ frame: CGRect?) {
+    miniFrame = frame
+    setNeedsLayout()
+    let visible = frame != nil
+    dataQueue.async { [weak self] in
+      guard let self else { return }
+      self.miniVisible = visible
+      if !visible { self.flushMini() }
+    }
+  }
+
+  /// dataQueue üzerinde çağrılır: ön kameranın karesi pencereye.
+  private func showInMini(_ sampleBuffer: CMSampleBuffer) {
+    if #available(iOS 17.0, *) {
+      let renderer = miniDisplay.sampleBufferRenderer
+      if renderer.status == .failed { renderer.flush() }
+      if renderer.isReadyForMoreMediaData { renderer.enqueue(sampleBuffer) }
+    } else {
+      if miniDisplay.status == .failed { miniDisplay.flush() }
+      if miniDisplay.isReadyForMoreMediaData { miniDisplay.enqueue(sampleBuffer) }
+    }
+  }
+
+  /// Gizlenince eski kare kalmasın.
+  private func flushMini() {
+    if #available(iOS 17.0, *) {
+      miniDisplay.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
+    } else {
+      miniDisplay.flushAndRemoveImage()
+    }
+  }
+
+  // MARK: - Ön+Arka düzeni, yer değiştirme, pencereyi taşıma
+
+  /// JS'ten (ayarlardan): "pip" ya da "split". Tek videoya da aynı düzen yazılır.
+  func setLayout(_ value: String) {
+    guard let newLayout = DualLayout(rawValue: value), newLayout != layout else { return }
+    layout = newLayout
+    setNeedsLayout()
+    syncRecordingLayout()
+  }
+
+  /// JS'ten (kaydedilmiş ayardan) pencerenin yeri; nil = sağ üst köşe. Sürüklerken yok sayılır.
+  func setPipPosition(_ center: CGPoint?) {
+    guard pipPan.state != .began, pipPan.state != .changed else { return }
+    pipCenter = center
+    setNeedsLayout()
+    syncRecordingLayout()
+  }
+
+  // MARK: - Ses tuşları
+
+  /// Ses tuşları (iOS 17.2+): ses kısma birincil, ses açma ikincil olay. Ne yapılacağına JS karar
+  /// verir (birincil: çek / durdur; ikincil: kayıtta foto). Kapalıyken tuşlar sesi değiştirir.
+  private func addCaptureButtons() {
+    guard #available(iOS 17.2, *) else { return }
+    let interaction = AVCaptureEventInteraction(
+      primary: { [weak self] event in
+        if event.phase == .ended { self?.onHardwareButton(["button": "primary"]) }
+      },
+      secondary: { [weak self] event in
+        if event.phase == .ended { self?.onHardwareButton(["button": "secondary"]) }
+      })
+    addInteraction(interaction)
+    buttonInteraction = interaction
+  }
+
+  /// JS'ten: ayarlardan kapalıysa ya da ayarlar ekranı açıksa tuşlar normal ses tuşu olur.
+  func setHardwareButtons(_ enabled: Bool) {
+    guard #available(iOS 17.2, *), let interaction = buttonInteraction as? AVCaptureEventInteraction else { return }
+    interaction.isEnabled = enabled
+  }
+
+  /// Pencereye (bölünmüşte iki yarıdan birine) dokununca kameralar yer değiştirir.
+  @objc private func swapTapped() {
+    swapped.toggle()
+    UIView.transition(with: self, duration: 0.25, options: .transitionCrossDissolve) {
+      self.setNeedsLayout()
+      self.layoutIfNeeded()
+    }
+    syncRecordingLayout()
+  }
+
+  /// Kişi ayırma yalnızca "sahneye yerleştir" açıkken çalışır (pil). Önizleme pencere boyutunda çizilir.
+  private func syncSegmentation(on: Bool, size: CGSize) {
+    let scale = min(window?.screen.scale ?? 2, 720 / max(size.width, size.height, 1))
+    let pixels = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+    dataQueue.async { [weak self] in
+      guard let self else { return }
+      self.segmentationOn = on
+      self.cutoutPreviewSize = pixels
+      if !on { self.segmenter.latest = nil }
+    }
+    if !on { cutoutLayer.contents = nil }
+  }
+
+  /// dataQueue üzerinde: yeni maskeyle kesilmiş kişiyi çizip önizlemeye koyar.
+  private func renderCutoutPreview() {
+    guard let latest = segmenter.latest, cutoutPreviewSize.width > 0, cutoutPreviewSize.height > 0 else { return }
+    let target = CGRect(origin: .zero, size: cutoutPreviewSize)
+    let person = PipCompositor.cutout(CIImage(cvPixelBuffer: latest.face), mask: latest.mask)
+    guard let image = previewContext.createCGImage(PipCompositor.fill(person, into: target), from: target) else { return }
+    DispatchQueue.main.async { [weak self] in
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      self?.cutoutLayer.contents = image
+      CATransaction.commit()
+    }
+  }
+
+  private func syncRecordingLayout() {
+    let current = CompositeLayout(layout: layout, swapped: swapped && layout != .cutout, pip: pipCenter)
+    dataQueue.async { [weak self] in self?.recordingLayout = current }
+  }
+
+  /// Parmağı takip eder; bırakınca hızına göre o yöne kayar (fırlatma). Pencere karenin dışına
+  /// taşmaz. Son yer JS'e bildirilir (kalıcı olsun diye).
+  @objc private func pipPanned(_ pan: UIPanGestureRecognizer) {
+    let vr = videoRect
+    guard vr.width > 0, vr.height > 0 else { return }
+    let current = pipContainer.center
+    var target = current
+    switch pan.state {
+    case .changed:
+      let t = pan.translation(in: self)
+      pan.setTranslation(.zero, in: self)
+      target = CGPoint(x: current.x + t.x, y: current.y + t.y)
+    case .ended, .cancelled:
+      let v = pan.velocity(in: self)
+      target = CGPoint(x: current.x + v.x * 0.15, y: current.y + v.y * 0.15)
+    default:
+      return
+    }
+
+    let normalized = CGPoint(x: (target.x - vr.minX) / vr.width, y: (target.y - vr.minY) / vr.height)
+    let rect = Pip.rect(in: vr.size, center: normalized, scale: layout == .cutout ? Pip.cutoutScale : 1)
+    let frame = rect.offsetBy(dx: vr.minX, dy: vr.minY)
+    let center = CGPoint(x: rect.midX / vr.width, y: rect.midY / vr.height)
+    pipCenter = center
+    syncRecordingLayout()
+
+    if pan.state == .changed {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      pipContainer.frame = frame
+      CATransaction.commit()
+    } else {
+      UIView.animate(
+        withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0,
+        options: [.allowUserInteraction, .beginFromCurrentState]
+      ) { self.pipContainer.frame = frame }
+      onPipMove(["x": Double(center.x), "y": Double(center.y)])
+    }
+  }
+
+  /// JS'ten gelen kamera seçimi: "both", "back" ya da "front". Kayıt sırasında yalnızca tek kameralar
+  /// arasında (arka ↔ ön) değişir; kayıt aynı dosyada sürer.
   func setCameras(_ value: String) {
-    guard !isRecording, let newMode = CameraMode(rawValue: value), newMode != mode else { return }
+    guard let newMode = CameraMode(rawValue: value), newMode != mode else { return }
+    if isRecording {
+      guard newMode != .both, mode != .both else { return }
+      dataQueue.async { [weak self] in self?.recorder?.pendingSource = newMode }
+    }
     mode = newMode
     setNeedsLayout()
     sessionQueue.async { [weak self] in
@@ -377,6 +1176,8 @@ final class DualCameraView: ExpoView,
       self.activeMode = newMode
       self.applyCameraMode()
       self.applyTorch()
+      self.applyZoom()
+      self.emitZoomRange()
     }
   }
 
@@ -396,8 +1197,63 @@ final class DualCameraView: ExpoView,
       }
       self.applyCameraMode()
       self.session.commitConfiguration()
-      // Format değişince ışık sönebiliyor.
+      // Format değişince ışık sönebiliyor, yakınlaştırma da 1x'e döner.
       self.applyTorch()
+      self.applyZoom()
+    }
+  }
+
+  /// JS'ten gelen yakınlaştırma (1 = normal). Kayıt sırasında da değişebilir.
+  func setZoom(_ value: Double) {
+    sessionQueue.async { [weak self] in
+      guard let self else { return }
+      self.zoomWanted = CGFloat(value)
+      self.applyZoom()
+    }
+  }
+
+  /// Ekrandaki yakınlaştırma (1x = geniş açı lens) ile cihazın `videoZoomFactor`'ü arasındaki çarpan.
+  /// Ultra geniş lensli sanal kamerada 1.0 ultra geniştir (0,5x); geniş açı lense ilk geçiş
+  /// noktasında (genelde 2.0) geçilir.
+  private func zoomScale(_ device: AVCaptureDevice) -> CGFloat {
+    guard device.constituentDevices.contains(where: { $0.deviceType == .builtInUltraWideCamera }),
+      let wide = device.virtualDeviceSwitchOverVideoZoomFactors.first
+    else { return 1 }
+    return CGFloat(truncating: wide)
+  }
+
+  private var mainCamera: CameraLinks? { activeMode == .front ? front : back }
+
+  /// sessionQueue üzerinde çağrılır. JS yakınlaştırma düğmelerini buna göre gösterir (0,5x yalnızca
+  /// ultra geniş lens varsa).
+  private func emitZoomRange() {
+    guard let device = mainCamera?.device else { return }
+    let scale = zoomScale(device)
+    let range: [String: Any] = [
+      "min": Double(device.minAvailableVideoZoomFactor / scale),
+      "max": Double(min(device.maxAvailableVideoZoomFactor / scale, maxZoom)),
+    ]
+    DispatchQueue.main.async { [weak self] in self?.onZoomRange(range) }
+  }
+
+  /// sessionQueue üzerinde çağrılır. Yakınlaştırma tam ekrandaki kameraya uygulanır (ön modunda ön
+  /// kamera, yoksa arka); küçük penceredeki yüz kamerası hep 1x kalır. Sanal kamera 3x'ten sonra
+  /// tele lense geçer; ötesi dijital olduğu için 10x ile sınırlı.
+  private func applyZoom() {
+    let other = activeMode == .front ? back : front
+    for (links, zoom) in [(mainCamera, zoomWanted), (other, 1)] {
+      guard let device = links?.device else { continue }
+      let scale = zoomScale(device)
+      let upper = min(device.maxAvailableVideoZoomFactor, maxZoom * scale)
+      let clamped = min(max(zoom * scale, device.minAvailableVideoZoomFactor), upper)
+      guard device.videoZoomFactor != clamped else { continue }
+      do {
+        try device.lockForConfiguration()
+        device.videoZoomFactor = clamped
+        device.unlockForConfiguration()
+      } catch {
+        // Kilitlenemezse bir sonraki değişiklikte yeniden denenir.
+      }
     }
   }
 
@@ -431,14 +1287,16 @@ final class DualCameraView: ExpoView,
     }
   }
 
-  /// sessionQueue üzerinde çağrılır. Kullanılmayan kameranın ve o çekim türünde gerekmeyen çıkışların
-  /// akışını kapatır (ısınma/pil). Fotoda mikrofon da kapanır.
+  /// sessionQueue üzerinde çağrılır. İki kamera da hep açık: bağlantıyı açıp kapatmak oturumu yeniden
+  /// kurar ve iki görüntü de ~1 sn donar. Kamera değiştirmek (kayıtta çevirmek dahil) böylece anında
+  /// olur; kullanılmayan kamera yalnızca gösterilmez ve yazılmaz. Video kareleri fotoda da açık (göz
+  /// teması penceresi onlarla beslenir); fotoda yalnızca mikrofon kapanır. Foto çıkışı videoda da açık
+  /// (kayıtta foto).
   private func applyCameraMode() {
-    for (links, used) in [(back, activeMode.usesBack), (front, activeMode.usesFront)] {
-      guard let links else { continue }
-      links.preview.isEnabled = used
-      links.video.isEnabled = used && activeKind == .video
-      links.photo.isEnabled = used && activeKind == .photo
+    for links in [back, front].compactMap({ $0 }) {
+      links.preview.isEnabled = true
+      links.video.isEnabled = true
+      links.photo.isEnabled = true
     }
     audioConnection?.isEnabled = activeKind == .video
   }
@@ -512,6 +1370,8 @@ final class DualCameraView: ExpoView,
     }
     // Oturum durunca ışık da söner; yeniden açılınca geri yak.
     applyTorch()
+    applyZoom()
+    emitZoomRange()
     DispatchQueue.main.async { [weak self] in
       // Önizleme bağlantıları artık var; yönlerini ana thread'de ayarla.
       self?.setNeedsLayout()
@@ -530,33 +1390,61 @@ final class DualCameraView: ExpoView,
     session.beginConfiguration()
     defer { session.commitConfiguration() }
 
-    guard
-      let backCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-      let frontCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+    guard let frontCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
     else { throw DualCameraError.noCamera }
-
-    back = try addCamera(
-      backCamera, output: backOutput, photoOutput: backPhotoOutput, preview: backPreview, mirrored: false)
     front = try addCamera(
       frontCamera, output: frontOutput, photoOutput: frontPhotoOutput, preview: frontPreview, mirrored: true)
+
+    // Arka kamera: önce lensler arasında kendiliğinden geçen sanal kameralar (0,5x ultra geniş,
+    // 3x tele), olmazsa tek geniş açı lens. Sanal kamera ön kamerayla birlikte 1080p'de donanıma
+    // sığmıyorsa bir sonrakine geçilir; tek lens gerekirse 720p'ye düşer.
+    var lastError: Error = DualCameraError.noCamera
+    for candidate in backCandidates(with: frontCamera) {
+      let fallback = candidate.deviceType == .builtInWideAngleCamera
+      do {
+        let links = try addCamera(
+          candidate, output: backOutput, photoOutput: backPhotoOutput, preview: backPreview, mirrored: false)
+        back = links
+        if try applyFormats(allowDowngrade: fallback) || fallback {
+          break
+        }
+        removeCamera(links)
+      } catch {
+        lastError = error
+      }
+      back = nil
+    }
+    guard back != nil else { throw lastError }
+
     applyOrientation()
-    try applyFormats()
     // Mikrofon izni yoksa kamera yine açılır, video sessiz kaydedilir.
     try? addMicrophone()
     applyCameraMode()
   }
 
+  /// Ön kamerayla birlikte çift kamera oturumunda kullanılabilen arka kameralar, tercih sırasıyla.
+  private func backCandidates(with front: AVCaptureDevice) -> [AVCaptureDevice] {
+    let types: [AVCaptureDevice.DeviceType] = [.builtInTripleCamera, .builtInDualWideCamera, .builtInWideAngleCamera]
+    let sets = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .unspecified)
+      .supportedMultiCamDeviceSets
+    return types
+      .compactMap { AVCaptureDevice.default($0, for: .video, position: .back) }
+      .filter { device in sets.contains { $0.contains(device) && $0.contains(front) } }
+  }
+
   /// sessionQueue üzerinde, oturum yapılandırılırken çağrılır. Video: 16:9 1080p; foto: 4:3, en yüksek
-  /// foto çözünürlüğü. Donanım iki kamerayı kaldırmazsa önce yüz kamerasını küçültür.
-  private func applyFormats() throws {
-    guard let back, let front else { return }
+  /// foto çözünürlüğü. Donanım iki kamerayı kaldırmazsa ve `allowDowngrade` ise önce yüz, sonra sahne
+  /// kamerasını küçültür. Donanım sınırı aşılmıyorsa true döner.
+  @discardableResult
+  private func applyFormats(allowDowngrade: Bool = true) throws -> Bool {
+    guard let back, let front else { return false }
     let photo = activeKind == .photo
     try selectFormat(back.device, photo: photo, maxWidth: 1920)
     try selectFormat(front.device, photo: photo, maxWidth: 1920)
-    if session.hardwareCost > 1.0 {
+    if allowDowngrade && session.hardwareCost > 1.0 {
       try selectFormat(front.device, photo: photo, maxWidth: 1280)
     }
-    if session.hardwareCost > 1.0 {
+    if allowDowngrade && session.hardwareCost > 1.0 {
       try selectFormat(back.device, photo: photo, maxWidth: 1280)
     }
     // Foto, kameranın o anki formatının izin verdiği en büyük boyutta çekilsin.
@@ -571,8 +1459,10 @@ final class DualCameraView: ExpoView,
       self?.frameRatio = ratio
       self?.setNeedsLayout()
     }
+    return session.hardwareCost <= 1.0
   }
 
+  /// Kamerayı oturuma bağlar; yarıda kalırsa eklediği girişi geri alır (bir sonraki aday denensin).
   private func addCamera(
     _ device: AVCaptureDevice, output: AVCaptureVideoDataOutput, photoOutput: AVCapturePhotoOutput,
     preview: AVCaptureVideoPreviewLayer, mirrored: Bool
@@ -580,38 +1470,54 @@ final class DualCameraView: ExpoView,
     let input = try AVCaptureDeviceInput(device: device)
     guard session.canAddInput(input) else { throw DualCameraError.noCamera }
     session.addInputWithNoConnections(input)
+    var added: [AVCaptureConnection] = []
 
-    guard let port = input.ports(
-      for: .video, sourceDeviceType: device.deviceType, sourceDevicePosition: device.position
-    ).first else { throw DualCameraError.noCamera }
-
-    output.alwaysDiscardsLateVideoFrames = true
-    output.setSampleBufferDelegate(self, queue: dataQueue)
-    guard session.canAddOutput(output) else { throw DualCameraError.noCamera }
-    session.addOutputWithNoConnections(output)
-
-    let outConn = AVCaptureConnection(inputPorts: [port], output: output)
-    guard session.canAddConnection(outConn) else { throw DualCameraError.noCamera }
-    session.addConnection(outConn)
-
-    guard session.canAddOutput(photoOutput) else { throw DualCameraError.noCamera }
-    session.addOutputWithNoConnections(photoOutput)
-    let photoConn = AVCaptureConnection(inputPorts: [port], output: photoOutput)
-    guard session.canAddConnection(photoConn) else { throw DualCameraError.noCamera }
-    session.addConnection(photoConn)
-
-    preview.setSessionWithNoConnection(session)
-    let previewConn = AVCaptureConnection(inputPort: port, videoPreviewLayer: preview)
-    guard session.canAddConnection(previewConn) else { throw DualCameraError.noCamera }
-    session.addConnection(previewConn)
-
-    // Yalnızca yüz önizlemesi ayna gibidir; kaydedilen yüz videosu ve fotosu düzdür.
-    for conn in [outConn, photoConn, previewConn] where conn.isVideoMirroringSupported {
-      conn.automaticallyAdjustsVideoMirroring = false
-      conn.isVideoMirrored = mirrored && conn === previewConn
+    func connect(_ conn: AVCaptureConnection) throws {
+      guard session.canAddConnection(conn) else { throw DualCameraError.noCamera }
+      session.addConnection(conn)
+      added.append(conn)
     }
 
-    return CameraLinks(device: device, video: outConn, photo: photoConn, preview: previewConn)
+    do {
+      guard let port = input.ports(
+        for: .video, sourceDeviceType: device.deviceType, sourceDevicePosition: device.position
+      ).first else { throw DualCameraError.noCamera }
+
+      // Çıkışlar önceki denemeden kalmış olabilir.
+      output.alwaysDiscardsLateVideoFrames = true
+      output.setSampleBufferDelegate(self, queue: dataQueue)
+      for out in [output, photoOutput] as [AVCaptureOutput] where !session.outputs.contains(out) {
+        guard session.canAddOutput(out) else { throw DualCameraError.noCamera }
+        session.addOutputWithNoConnections(out)
+      }
+
+      let outConn = AVCaptureConnection(inputPorts: [port], output: output)
+      try connect(outConn)
+      let photoConn = AVCaptureConnection(inputPorts: [port], output: photoOutput)
+      try connect(photoConn)
+      // Foto her zaman en yüksek kalitede (oturum başlamadan ayarlanmalı).
+      photoOutput.maxPhotoQualityPrioritization = .quality
+      preview.setSessionWithNoConnection(session)
+      let previewConn = AVCaptureConnection(inputPort: port, videoPreviewLayer: preview)
+      try connect(previewConn)
+
+      // Yalnızca yüz önizlemesi ayna gibidir; kaydedilen yüz videosu ve fotosu düzdür.
+      for conn in [outConn, photoConn, previewConn] where conn.isVideoMirroringSupported {
+        conn.automaticallyAdjustsVideoMirroring = false
+        conn.isVideoMirrored = mirrored && conn === previewConn
+      }
+
+      return CameraLinks(device: device, input: input, video: outConn, photo: photoConn, preview: previewConn)
+    } catch {
+      added.forEach { session.removeConnection($0) }
+      session.removeInput(input)
+      throw error
+    }
+  }
+
+  private func removeCamera(_ links: CameraLinks) {
+    [links.video, links.photo, links.preview].forEach { session.removeConnection($0) }
+    session.removeInput(links.input)
   }
 
   /// Çoklu kamera destekli, 30 fps yapabilen, en fazla `maxWidth` genişlikte format.
@@ -719,13 +1625,32 @@ final class DualCameraView: ExpoView,
 
   // MARK: - Kayıt
 
+  /// JS'ten (ayarlardan): Ön+Arka kayıt tek video mu olsun. Sonraki kayıtta geçerli olur.
+  func setNoiseReduction(_ enabled: Bool) {
+    dataQueue.async { [weak self] in
+      guard let self else { return }
+      if enabled != (self.denoiser != nil) { self.denoiser = enabled ? NoiseReducer() : nil }
+    }
+  }
+
+  func setCombine(_ value: Bool) {
+    combine = value
+  }
+
   func startRecording() {
     isRecording = true
     let mode = self.mode
+    // Sahneye yerleştir yalnızca tek videoyla anlamlı.
+    let combine = self.combine || layout == .cutout
     dataQueue.async { [weak self] in
       guard let self, self.recorder == nil else { return }
-      self.recorder = Recorder(mode: mode)
+      self.recorder = Recorder(mode: mode, combine: combine)
     }
+  }
+
+  /// Kaydı duraklatır / sürdürür. Dosya açık kalır; duraklatılan süre videoda yer almaz.
+  func setPaused(_ paused: Bool) {
+    dataQueue.async { [weak self] in self?.recorder?.paused = paused }
   }
 
   func stopRecording(completion: @escaping (Result<[String: Any], Error>) -> Void) {
@@ -823,14 +1748,16 @@ final class DualCameraView: ExpoView,
   // MARK: - Foto
 
   /// Seçili kameralarla birer foto çeker ve ayrı ayrı galeriye kaydeder (önce sahne, sonra yüz).
+  /// Video kaydı sürerken de çalışır; o zaman deklanşör sesi (destekleniyorsa) çıkmaz.
   func takePhoto(completion: @escaping (Result<[String: Any], Error>) -> Void) {
+    let silent = isRecording
     sessionQueue.async { [weak self] in
       guard let self else { return }
       let outputs = [
         self.activeMode.usesBack ? self.backPhotoOutput : nil,
         self.activeMode.usesFront ? self.frontPhotoOutput : nil,
       ].compactMap { $0 }
-      guard self.session.isRunning, self.activeKind == .photo, !outputs.isEmpty else {
+      guard self.session.isRunning, !outputs.isEmpty else {
         DispatchQueue.main.async { completion(.failure(DualCameraError.photoFailed)) }
         return
       }
@@ -856,20 +1783,36 @@ final class DualCameraView: ExpoView,
       }
       self.shots.insert(shot)
       for output in outputs {
-        output.capturePhoto(with: Self.photoSettings(for: output), delegate: shot)
+        output.capturePhoto(with: Self.photoSettings(for: output, silent: silent), delegate: shot)
       }
     }
   }
 
-  private static func photoSettings(for output: AVCapturePhotoOutput) -> AVCapturePhotoSettings {
+  private static func photoSettings(for output: AVCapturePhotoOutput, silent: Bool) -> AVCapturePhotoSettings {
     let settings = output.availablePhotoCodecTypes.contains(.hevc)
       ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
       : AVCapturePhotoSettings()
     settings.maxPhotoDimensions = output.maxPhotoDimensions
+    settings.photoQualityPrioritization = .quality
+    // Kayıt sırasında deklanşör sesi videoya girmesin (sesin zorunlu olduğu ülkelerde desteklenmez).
+    if silent, #available(iOS 18.0, *), output.isShutterSoundSuppressionSupported {
+      settings.isShutterSoundSuppressionEnabled = true
+    }
     return settings
   }
 
   // MARK: - Kareler (dataQueue)
+
+  /// Mikrofonun ses düzeyi (dB, 0 en yüksek). Kayıt yokken de gider; saniyede en fazla 10 kez.
+  private func emitAudioLevel(_ connection: AVCaptureConnection) {
+    let now = CACurrentMediaTime()
+    guard now - lastLevelEmit >= 0.1,
+      let db = connection.audioChannels.map(\.averagePowerLevel).max()
+    else { return }
+    lastLevelEmit = now
+    let level: [String: Any] = ["db": Double(db)]
+    DispatchQueue.main.async { [weak self] in self?.onAudioLevel(level) }
+  }
 
   private var audioSettings: [String: Any]? {
     audioOutput.recommendedAudioSettingsForAssetWriter(writingTo: .mov) as? [String: Any]
@@ -878,16 +1821,52 @@ final class DualCameraView: ExpoView,
   func captureOutput(
     _ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection
   ) {
+    var sampleBuffer = sampleBuffer
+    if output === audioOutput {
+      emitAudioLevel(connection)
+      // Hışırtı azaltma kayıt yokken de çalışır: hışırtıyı önceden öğrenir, kayıt ilk saniyeden temiz.
+      if let denoiser { sampleBuffer = denoiser.process(sampleBuffer) }
+    }
+    if output === frontOutput, miniVisible {
+      showInMini(sampleBuffer)
+    }
+    if output === frontOutput, segmentationOn, let frame = CMSampleBufferGetImageBuffer(sampleBuffer) {
+      segmenter.submit(frame, on: dataQueue) { [weak self] in self?.renderCutoutPreview() }
+    }
     guard let recorder else { return }
     let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
-    if output === audioOutput {
-      guard let start = recorder.startTime, CMTimeCompare(time, start) >= 0 else { return }
-      recorder.tracks.forEach { $0.appendAudio(sampleBuffer) }
+    if output === frontOutput, recorder.style == .combined {
+      recorder.latestFace = CMSampleBufferGetImageBuffer(sampleBuffer)
       return
     }
 
-    let target = output === backOutput ? recorder.back : output === frontOutput ? recorder.front : nil
+    // Duraklatılmışken görüntü ve ses atılır; devam edince aradaki süre düşülür.
+    if recorder.startTime != nil {
+      if recorder.paused {
+        if recorder.pauseStart == nil { recorder.pauseStart = time }
+        return
+      }
+      if let pauseStart = recorder.pauseStart {
+        recorder.offset = CMTimeAdd(recorder.offset, CMTimeSubtract(time, pauseStart))
+        recorder.pauseStart = nil
+      }
+    }
+    let sample = recorder.retimed(sampleBuffer)
+
+    if output === audioOutput {
+      guard let start = recorder.startTime, CMTimeCompare(time, start) >= 0 else { return }
+      recorder.tracks.forEach { $0.appendAudio(sample) }
+      return
+    }
+
+    let target: Track?
+    if recorder.style == .single {
+      let camera: CameraMode? = output === backOutput ? .back : output === frontOutput ? .front : nil
+      target = camera.map(recorder.accepts) == true ? recorder.back : nil
+    } else {
+      target = output === backOutput ? recorder.back : output === frontOutput ? recorder.front : nil
+    }
     guard let track = target else { return }
 
     if let start = recorder.startTime {
@@ -917,6 +1896,16 @@ final class DualCameraView: ExpoView,
         return
       }
     }
-    track.appendVideo(sampleBuffer)
+    switch (recorder.style, recorder.compositor) {
+    case (.combined, let compositor?):
+      let cutout = recordingLayout.layout == .cutout
+      track.appendVideo(
+        sample, face: cutout ? segmenter.latest?.face : recorder.latestFace,
+        mask: cutout ? segmenter.latest?.mask : nil, layout: recordingLayout, compositor: compositor)
+    case (.single, let compositor?):
+      track.appendVideo(sample, compositor: compositor)
+    default:
+      track.appendVideo(sample)
+    }
   }
 }
