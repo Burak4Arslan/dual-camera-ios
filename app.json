@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "DualCam",
+    "name": "Dual Camera",
     "slug": "DualCam",
     "scheme": "dualcam",
     "version": "1.0.0",
@@ -10,13 +10,28 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.burakarslan.dualcam",
+      "buildNumber": "2",
       "appleTeamId": "5BF7PPQH95",
       "infoPlist": {
-        "NSCameraUsageDescription": "DualCam uses the front and back cameras to record videos and take photos.",
-        "NSMicrophoneUsageDescription": "DualCam records sound with your videos. Without access, videos are saved without sound.",
-        "NSPhotoLibraryAddUsageDescription": "DualCam saves your videos and photos to your library.",
+        "NSCameraUsageDescription": "The front and back cameras are used to record videos and take photos.",
+        "NSMicrophoneUsageDescription": "The microphone records sound with your videos. Without access, videos are saved without sound.",
+        "NSPhotoLibraryAddUsageDescription": "Used to save the videos and photos you take to your library.",
         "UIRequiresFullScreen": true,
         "CFBundleAllowMixedLocalizations": true
+      },
+      "config": {
+        "usesNonExemptEncryption": false
+      },
+      "privacyManifests": {
+        "NSPrivacyAccessedAPITypes": [
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryDiskSpace",
+            "NSPrivacyAccessedAPITypeReasons": [
+              "85F4.1",
+              "E174.1"
+            ]
+          }
+        ]
       }
     },
     "android": {
@@ -45,7 +60,28 @@
           }
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      "./plugins/withSceneDelegate",
+      "./plugins/withExpoWidgetsFixes",
+      "./plugins/withLaunchControl",
+      [
+        "expo-widgets",
+        {
+          "widgets": [
+            {
+              "name": "QuickLaunch",
+              "displayName": "Dual Camera",
+              "description": "Opens the camera with one tap.",
+              "ios": {
+                "supportedFamilies": [
+                  "systemSmall",
+                  "accessoryCircular"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     ],
     "locales": {
       "tr": "./locales/tr.json",

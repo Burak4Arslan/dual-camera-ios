@@ -11,7 +11,6 @@ const DIM_AFTER_MS = 30_000;
  */
 export function useScreenDimmer(enabled: boolean) {
   const enabledRef = useRef(enabled);
-  enabledRef.current = enabled;
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const dimmed = useRef(false);
 
@@ -33,6 +32,7 @@ export function useScreenDimmer(enabled: boolean) {
   }, [undim]);
 
   useEffect(() => {
+    enabledRef.current = enabled;
     if (enabled) wake();
     else undim();
   }, [enabled, wake, undim]);

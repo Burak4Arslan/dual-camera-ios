@@ -4,27 +4,72 @@ import ExpoModulesCore
 public class DualCameraModule: Module {
   /// Karartmadan önceki parlaklık; ana thread'de kullanılır.
   private var savedBrightness: CGFloat?
+  /// İstenen parlaklık ("dim" / "max"); uygulamaya dönünce yeniden uygulanır. `nil`: kullanıcınınki.
+  private var targetLevel: String?
+  /// En son bizim verdiğimiz değer. iOS aynı değer tekrar istenince komutu yok sayıyor (kilitten
+  /// dönünce ekran loş kalırken 1.0 istemek işe yaramıyordu); yeniden uygularken değer biraz değişir.
+  private var lastSetBrightness: CGFloat?
+  private var observers: [NSObjectProtocol] = []
 
   public func definition() -> ModuleDefinition {
     Name("DualCamera")
 
+    // Kilitten ya da başka uygulamadan dönünce iOS kullanıcının parlaklığını geri yükler; bunu
+    // uygulama etkinleştikten sonra da yapabiliyor (ön ışık beyaz ama loş kalıyordu). İstenen düzey
+    // dönüşte ve parlaklık her değiştiğinde (uygulama öndeyken) yeniden uygulanır.
+    OnCreate {
+      let center = NotificationCenter.default
+      for name in [UIApplication.didBecomeActiveNotification, UIScene.didActivateNotification] {
+        observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+          for delay in [0.0, 0.35, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.applyTargetBrightness() }
+          }
+        })
+      }
+      observers.append(center.addObserver(forName: UIScreen.brightnessDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+        self?.applyTargetBrightness()
+      })
+    }
+
+    OnDestroy {
+      observers.forEach { NotificationCenter.default.removeObserver($0) }
+      observers.removeAll()
+    }
+
     // Ekran parlaklığı: "dim" uzun çekimde pil için loş (görüntü görünür kalır), "max" ön ışık için
     // tam, "normal" kullanıcının parlaklığı. Uygulama öndeyken geçerlidir; uygulamadan çıkınca iOS
-    // kullanıcının parlaklığını kendisi geri yükler.
+    // kullanıcının parlaklığını kendisi geri yükler, dönünce istenen düzey yeniden uygulanır.
     AsyncFunction("setScreenBrightness") { (level: String) in
-      let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
-      guard let screen else { return }
+      guard let screen = currentScreen() else { return }
       switch level {
       case "dim", "max":
         if savedBrightness == nil { savedBrightness = screen.brightness }
-        screen.brightness = level == "max" ? 1 : 0.1
+        targetLevel = level
+        applyTargetBrightness()
       default:
+        targetLevel = nil
         if let saved = savedBrightness {
           screen.brightness = saved
+          lastSetBrightness = saved
           savedBrightness = nil
         }
       }
     }.runOnQueue(.main)
+
+    // Önceki açılışlardan kalan (yarım kalmış ya da galeriye gidememiş) kayıtları galeriye kaydeder;
+    // kaç dosya kurtarıldığını döner.
+    AsyncFunction("recoverRecordings") { (promise: Promise) in
+      PendingRecordings.recover { count in promise.resolve(count) }
+    }
+
+    // Ayarlar → Hakkında: App Store'daki sürüm ve build numarası (Info.plist'ten).
+    Function("appVersion") { () -> [String: String] in
+      let info = Bundle.main.infoDictionary ?? [:]
+      return [
+        "version": info["CFBundleShortVersionString"] as? String ?? "",
+        "build": info["CFBundleVersion"] as? String ?? "",
+      ]
+    }
 
     Function("isSupported") { () -> Bool in
       AVCaptureMultiCamSession.isMultiCamSupported
@@ -55,7 +100,7 @@ public class DualCameraModule: Module {
 
     View(DualCameraView.self) {
       Events(
-        "onReady", "onMicChange", "onCameraError", "onAutoStopped", "onZoomRange", "onAudioLevel", "onPipMove",
+        "onReady", "onMicChange", "onCameraError", "onAutoStopped", "onZoomRange", "onZoomChange", "onAudioLevel", "onPipMove",
         "onHardwareButton", "onOrientationChange")
 
       Prop("cameras") { (view: DualCameraView, value: String) in
@@ -136,6 +181,24 @@ public class DualCameraModule: Module {
         }
       }
     }
+  }
+}
+
+private func currentScreen() -> UIScreen? {
+  UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
+}
+
+extension DualCameraModule {
+  /// Ana thread'de çağrılır. Uygulama arka plandayken dokunulmaz.
+  fileprivate func applyTargetBrightness() {
+    guard let level = targetLevel, UIApplication.shared.applicationState == .active,
+          let screen = currentScreen() else { return }
+    let target: CGFloat = level == "max" ? 1 : 0.1
+    // Kendi ayarımız da değişiklik bildirimi doğurur; zaten hedefteyse dokunma (döngü olmasın).
+    guard abs(screen.brightness - target) > 0.01 else { return }
+    let value = lastSetBrightness == target ? target - 0.002 : target
+    screen.brightness = value
+    lastSetBrightness = value
   }
 }
 

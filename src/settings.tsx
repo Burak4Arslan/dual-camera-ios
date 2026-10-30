@@ -15,7 +15,7 @@ export type Settings = {
   dimScreen: boolean;
   /** Yüz penceresinin son yeri; null = sağ üst köşe. */
   pipPosition: PipPosition | null;
-  /** Ön+Arka düzeni: küçük pencere ya da bölünmüş ekran (önizleme ve tek video). */
+  /** Ön+Arka düzeni: küçük pencere ya da bölünmüş ekran (önizleme ve tek dosya). */
   layout: DualLayout;
   /** Ses tuşlarıyla çekim: ses kısma çek / durdur, ses açma kayıtta foto. */
   volumeButtons: boolean;

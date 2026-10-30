@@ -4,12 +4,13 @@ import { StatusBar } from 'expo-status-bar';
 import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
-  AppState,
-  GestureResponderEvent,
   Linking,
+  PanResponder,
   Pressable,
+  StyleProp,
   StyleSheet,
   Text,
+  TextStyle,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -23,6 +24,7 @@ import {
   DualCameraView,
   getInterfaceOrientation,
   isSupported,
+  recoverRecordings,
   requestPermissions,
   setScreenBrightness,
 } from '../../modules/dual-camera';
@@ -45,16 +47,13 @@ const INTERVALS = [0, 1, 2, 3, 5, 10, 30, 60];
 const MAX_ZOOM = 10;
 /** Hızlı yakınlaştırma düğmeleri; cihazın aralığında olanlar gösterilir, sonuna "Maks" eklenir. */
 const ZOOM_PRESETS = [0.5, 1, 2, 5];
+/** Yakınlaştırma düğmelerinin üstünde parmak bu kadar (pt) sağa kayınca yakınlaştırma iki katına çıkar. */
+const ZOOM_SCRUB_DOUBLING = 70;
 
 /** "1.7×", Türkçede "1,7×". */
 function zoomLabel(zoom: number, language: Language) {
   const text = String(Math.round(zoom * 10) / 10);
   return `${language === 'tr' ? text.replace('.', ',') : text}×`;
-}
-
-function touchDistance(e: GestureResponderEvent) {
-  const [a, b] = e.nativeEvent.touches;
-  return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
 }
 
 function formatTime(sec: number) {
@@ -139,7 +138,7 @@ export default function CameraScreen() {
   const controlsLeft = landscape && uiOrientation === 'landscapeLeft';
   const [mode, setMode] = useState<Mode>('landscape');
   const [capture, setCapture] = useState<CaptureMode>('video');
-  const [cameras, setCameras] = useState<CameraMode>('both');
+  const [cameras, setCameraSelection] = useState<CameraMode>('both');
   const [torch, setTorch] = useState(false);
   /** Ön ışık: ekran tam parlak ve beyaz, önizleme ortada küçük; yüzü aydınlatır. Kayda etkisi yok. */
   const [frontLight, setFrontLight] = useState(false);
@@ -149,7 +148,30 @@ export default function CameraScreen() {
     ...ZOOM_PRESETS.filter((p) => p >= zoomRange.min - 0.01 && p < zoomRange.max),
     zoomRange.max,
   ];
-  const pinchStart = useRef<{ distance: number; zoom: number } | null>(null);
+  /** İki parmak ya da kaydırma sürüyor: büyük yakınlaştırma etiketi görünür. */
+  const [zoomAdjusting, setZoomAdjusting] = useState(false);
+  const zoomNow = useRef({ zoom, range: zoomRange });
+  useEffect(() => {
+    zoomNow.current = { zoom, range: zoomRange };
+  });
+  // Düğmelerin üstünde yana kaydırınca ara değerler (sağa yakınlaşır). Kısa dokunuş düğmeye gider.
+  const [zoomScrub] = useState(() => {
+    let start = 1;
+    const end = () => setZoomAdjusting(false);
+    return PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 8 && Math.abs(g.dx) > Math.abs(g.dy),
+      onPanResponderGrant: () => {
+        start = zoomNow.current.zoom;
+        setZoomAdjusting(true);
+      },
+      onPanResponderMove: (_, g) => {
+        const { min, max } = zoomNow.current.range;
+        setZoom(Math.min(max, Math.max(min, start * 2 ** (g.dx / ZOOM_SCRUB_DOUBLING))));
+      },
+      onPanResponderRelease: end,
+      onPanResponderTerminate: end,
+    });
+  });
   const [intervalSec, setIntervalSec] = useState(0);
   const [intervalPicker, setIntervalPicker] = useState(false);
   const [permission, setPermission] = useState<'pending' | 'ok' | 'denied'>('pending');
@@ -161,27 +183,28 @@ export default function CameraScreen() {
   const [shooting, setShooting] = useState(false);
   const [photos, setPhotos] = useState(0);
   const [busy, setBusy] = useState(false);
+  /** Deklanşöre üst üste basılınca (ya da ses tuşu + ekran) iki işlem birden başlamasın. */
+  const captureInFlight = useRef(false);
   const [elapsed, setElapsed] = useState(0);
   const [mic, setMic] = useState<Mic | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   /** Video kaydı ya da aralıklı çekim sürüyor; ayarlar kilitli. */
   const active = recording || shooting;
   const wake = useScreenDimmer(active && settings.dimScreen && !frontLight);
-  /** Sahneye yerleştir yalnızca tek videoyla anlamlı. */
+  /** Ön+Arka tek dosya (video ve foto); sahneye yerleştir yalnızca tek dosyayla anlamlı. */
   const combineVideo = settings.combineVideo || settings.layout === 'cutout';
 
-  // Ön ışık yalnızca ön kamera kullanılırken; açıkken parlaklık tam (uygulamadan dönünce yeniden).
-  useEffect(() => {
-    if (cameras === 'back') setFrontLight(false);
-  }, [cameras]);
+  /** Kamera seçimi; ön ışık yalnızca ön kamera kullanılırken açık kalabilir. */
+  function setCameras(value: CameraMode) {
+    setCameraSelection(value);
+    if (value === 'back') setFrontLight(false);
+  }
+
+  // Ön ışık açıkken parlaklık tam. Kilitten ya da başka uygulamadan dönünce yerel modül yeniden uygular.
   useEffect(() => {
     if (!frontLight) return;
     setScreenBrightness('max');
-    const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') setScreenBrightness('max');
-    });
     return () => {
-      sub.remove();
       setScreenBrightness('normal');
     };
   }, [frontLight]);
@@ -207,27 +230,6 @@ export default function CameraScreen() {
   const captureBottom = landscape ? edge.bottom : controlsBottom + 96;
   const zoomBottom = captureBottom + 44;
 
-  // İki parmakla yakınlaştırma (kamera görüntüsünün üstünde). Tek parmak dokunuşları kameraya
-  // gider: yüz penceresi native tarafta sürüklenir.
-  const pinch = {
-    onStartShouldSetResponder: (e: GestureResponderEvent) => e.nativeEvent.touches.length === 2,
-    onMoveShouldSetResponder: (e: GestureResponderEvent) => e.nativeEvent.touches.length === 2,
-    onResponderMove: (e: GestureResponderEvent) => {
-      if (e.nativeEvent.touches.length !== 2) {
-        pinchStart.current = null; // parmak kalkınca yeniden başla, zıplamasın
-        return;
-      }
-      if (!pinchStart.current) {
-        pinchStart.current = { distance: touchDistance(e), zoom };
-        return;
-      }
-      const next = (pinchStart.current.zoom * touchDistance(e)) / pinchStart.current.distance;
-      setZoom(Math.min(zoomRange.max, Math.max(zoomRange.min, next)));
-    },
-    onResponderRelease: () => (pinchStart.current = null),
-    onResponderTerminate: () => (pinchStart.current = null),
-  };
-
   // Mikrofon isteğe bağlı: izin yoksa video sessiz kaydedilir.
   useEffect(() => {
     requestPermissions().then(({ camera, microphone }) => {
@@ -235,6 +237,17 @@ export default function CameraScreen() {
       setMicAllowed(microphone);
     });
   }, []);
+
+  // Uygulama kayıt sırasında çöktüyse ya da galeriye aktarma olmadıysa kayıt kaybolmaz: dosyası
+  // durur ve burada galeriye kaydedilir.
+  useEffect(() => {
+    if (permission !== 'ok') return;
+    recoverRecordings()
+      .then((n) => n > 0 && setToast(fill(s.saved.recoveredCount, { n })))
+      .catch(() => {});
+    // Yalnızca açılışta bir kez (izin verilince).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [permission]);
 
   // Çekim yokken ekran seçilen moda göre döner (yatayda sol/sağ ikisi de olur).
   useEffect(() => {
@@ -246,8 +259,6 @@ export default function CameraScreen() {
 
   useEffect(() => {
     if (!active) return;
-    clock.current = { total: 0, since: Date.now() };
-    setElapsed(0);
     const id = setInterval(() => {
       const { total, since } = clock.current;
       setElapsed((total + (since ? Date.now() - since : 0)) / 1000);
@@ -256,16 +267,14 @@ export default function CameraScreen() {
   }, [active]);
 
   /** Foto çekildiğini belli et: iPhone kamerası gibi görüntü bir an kararıp açılır. */
-  function blink() {
+  const blink = useCallback(() => {
     if (!settings.shutterEffect) return;
     shutterBlink.setValue(1);
     Animated.timing(shutterBlink, { toValue: 0, duration: 250, useNativeDriver: true }).start();
-  }
+  }, [settings.shutterEffect, shutterBlink]);
 
   /** Native söz (promise) hatası: `code` çeviri anahtarı, `message` sistem ayrıntısı. */
-  function failText(e: any) {
-    return errorText(s, e?.code, e?.message);
-  }
+  const failText = useCallback((e: any) => errorText(s, e?.code, e?.message), [s]);
 
   // Aralıklı çekim: ilk foto hemen, sonra durdurana kadar her `intervalSec` saniyede bir.
   // Tek bir foto hata verirse çekim sürer (telefon başında kimse olmayabilir).
@@ -281,7 +290,7 @@ export default function CameraScreen() {
     shoot();
     const id = setInterval(shoot, intervalSec * 1000);
     return () => clearInterval(id);
-  }, [shooting, intervalSec]);
+  }, [shooting, intervalSec, blink, failText]);
 
   useEffect(() => {
     if (!toast) return;
@@ -290,23 +299,29 @@ export default function CameraScreen() {
   }, [toast]);
 
   async function toggleRecording() {
-    if (!camera.current || busy) return;
+    if (!camera.current || busy || captureInFlight.current) return;
+    captureInFlight.current = true;
     setBusy(true);
     try {
       if (recording) {
+        // Dosya kapanıp galeriye aktarılana kadar kayıt durumu (ve yön kilidi) korunur.
+        const { duration, files, recovered } = await camera.current.stopRecording();
         setRecording(false);
         setPaused(false);
-        const { duration, files } = await camera.current.stopRecording();
-        setToast(savedText(s, files, duration));
+        setToast((recovered ? s.saved.salvaged + ' ' : '') + savedText(s, files, duration));
       } else {
         await lockCurrentOrientation();
         await camera.current.startRecording();
+        clock.current = { total: 0, since: Date.now() };
+        setElapsed(0);
         setRecording(true);
       }
     } catch (e) {
       setRecording(false);
+      setPaused(false);
       setToast(failText(e));
     } finally {
+      captureInFlight.current = false;
       setBusy(false);
     }
   }
@@ -390,6 +405,8 @@ export default function CameraScreen() {
     }
     await lockCurrentOrientation();
     setPhotos(0);
+    clock.current = { total: 0, since: Date.now() };
+    setElapsed(0);
     setShooting(true);
   }
 
@@ -437,14 +454,17 @@ export default function CameraScreen() {
         onHardwareButton={(e) => onHardwareButton(e.nativeEvent.button)}
         onOrientationChange={(e) => setUiOrientation(e.nativeEvent.orientation)}
         onPipMove={(e) => settings.update({ pipPosition: { x: e.nativeEvent.x, y: e.nativeEvent.y } })}
-        {...pinch}
         style={StyleSheet.absoluteFill}
         onMicChange={(e) => setMic(e.nativeEvent)}
         onAudioLevel={(e) => audioLevel.setValue(levelFromDb(e.nativeEvent.db))}
         onZoomRange={(e) => {
-          const { min, max } = e.nativeEvent;
+          const { min, max, zoom } = e.nativeEvent;
           setZoomRange({ min, max });
-          setZoom((z) => Math.min(max, Math.max(min, z)));
+          setZoom(zoom);
+        }}
+        onZoomChange={(e) => {
+          setZoom(e.nativeEvent.zoom);
+          setZoomAdjusting(e.nativeEvent.active);
         }}
         onCameraError={(e) => setToast(errorText(s, e.nativeEvent.code, e.nativeEvent.detail))}
         onAutoStopped={(e) => {
@@ -472,7 +492,12 @@ export default function CameraScreen() {
         pointerEvents="box-none"
       >
         {!active && (
-          <Pressable style={styles.roundButton} onPress={() => router.push('/settings')}>
+          <Pressable
+            style={styles.roundButton}
+            accessibilityRole="button"
+            accessibilityLabel={s.a11y.settings}
+            onPress={() => router.push('/settings')}
+          >
             <Text style={styles.roundText}>⚙️</Text>
           </Pressable>
         )}
@@ -481,13 +506,22 @@ export default function CameraScreen() {
         {cameras !== 'back' && (
           <Pressable
             style={[styles.roundButton, frontLight && styles.torchOn]}
+            accessibilityRole="switch"
+            accessibilityLabel={s.a11y.frontLight}
+            accessibilityState={{ checked: frontLight }}
             onPress={() => setFrontLight(!frontLight)}
           >
             <Text style={styles.roundText}>💡</Text>
           </Pressable>
         )}
         {cameras !== 'front' && (
-          <Pressable style={[styles.roundButton, torch && styles.torchOn]} onPress={() => setTorch(!torch)}>
+          <Pressable
+            style={[styles.roundButton, torch && styles.torchOn]}
+            accessibilityRole="switch"
+            accessibilityLabel={s.a11y.torch}
+            accessibilityState={{ checked: torch }}
+            onPress={() => setTorch(!torch)}
+          >
             <Text style={styles.roundText}>🔦</Text>
           </Pressable>
         )}
@@ -549,15 +583,22 @@ export default function CameraScreen() {
 
       {mini && active && <LookHere mini={mini} landscape={landscape} lensLeft={uiOrientation === 'landscapeRight'} />}
 
-      {toast && (
+      {zoomAdjusting ? (
         <View style={[styles.toastWrap, { bottom: zoomBottom + 50 }]} pointerEvents="none">
-          <Text style={styles.toast}>{toast}</Text>
+          <Text style={styles.zoomHint}>{zoomLabel(zoom, language)}</Text>
         </View>
+      ) : (
+        toast && (
+          <View style={[styles.toastWrap, { bottom: zoomBottom + 50 }]} pointerEvents="none">
+            <Text style={styles.toast}>{toast}</Text>
+          </View>
+        )
       )}
 
-      {/* Kayıt sırasında da yakınlaştırılabilir. Etkin düğme iki parmakla ayarlanan değeri gösterir. */}
+      {/* Kayıt sırasında da yakınlaştırılabilir: düğmeler, üstlerinde yana kaydırma ya da iki parmak.
+          Etkin düğme ara değeri gösterir. */}
       <View style={[styles.captureWrap, { bottom: zoomBottom }]} pointerEvents="box-none">
-        <View style={styles.zoomRow}>
+        <View style={styles.zoomRow} {...zoomScrub.panHandlers}>
           {zoomPresets.map((preset, i) => {
             const next = zoomPresets[i + 1];
             const isMax = next === undefined;
@@ -605,32 +646,43 @@ export default function CameraScreen() {
           {!active && (
             <Pressable
               style={styles.modeButton}
-              onPress={() => {
-                setCameras(NEXT_CAMERA[cameras]);
-                setZoom(1); // tam ekrandaki kamera değişebilir
-              }}
+              onPress={() => setCameras(NEXT_CAMERA[cameras])}
             >
-              <Text style={styles.modeText}>{s.camera[cameras]}</Text>
+              <FitText text={s.camera[cameras]} style={styles.modeText} />
             </Pressable>
           )}
           {recording && (
-            <Pressable style={styles.modeButton} onPress={togglePause}>
+            <Pressable
+              style={styles.modeButton}
+              accessibilityRole="button"
+              accessibilityLabel={paused ? s.a11y.resume : s.a11y.pause}
+              onPress={togglePause}
+            >
               <Text style={styles.roundText}>{paused ? '▶️' : '⏸️'}</Text>
             </Pressable>
           )}
         </View>
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={
+            active ? s.a11y.stop : capture === 'video' ? s.a11y.record : intervalSec > 0 ? s.a11y.interval : s.a11y.photo
+          }
           onPress={onShutter}
           disabled={busy}
-          style={[styles.recordOuter, busy && { opacity: 0.5 }]}
+          style={[styles.recordOuter, frontLight && styles.recordOuterLit, busy && { opacity: 0.5 }]}
         >
           {active ? (
             <View style={styles.recordStop} />
           ) : capture === 'video' ? (
             <View style={styles.recordInner} />
           ) : (
-            <View style={styles.photoInner}>
-              {intervalSec > 0 && <Text style={styles.photoInnerText}>{intervalText(s, intervalSec)}</Text>}
+            <View style={[styles.photoInner, frontLight && styles.photoInnerLit]}>
+              {intervalSec > 0 && (
+                <FitText
+                  text={intervalText(s, intervalSec)}
+                  style={[styles.photoInnerText, frontLight && styles.photoInnerTextLit]}
+                />
+              )}
             </View>
           )}
         </Pressable>
@@ -640,11 +692,16 @@ export default function CameraScreen() {
               style={styles.modeButton}
               onPress={() => setMode(mode === 'landscape' ? 'portrait' : 'landscape')}
             >
-              <Text style={styles.modeText}>{s.orientation[mode]}</Text>
+              <FitText text={s.orientation[mode]} style={styles.modeText} />
             </Pressable>
           )}
           {recording && (
-            <Pressable style={styles.modeButton} onPress={snapWhileRecording}>
+            <Pressable
+              style={styles.modeButton}
+              accessibilityRole="button"
+              accessibilityLabel={s.a11y.snap}
+              onPress={snapWhileRecording}
+            >
               <View style={styles.snapInner} />
             </Pressable>
           )}
@@ -653,10 +710,9 @@ export default function CameraScreen() {
           {cameras !== 'both' && (
             <Pressable
               style={[styles.roundButton, styles.flipButton]}
-              onPress={() => {
-                setCameras(cameras === 'back' ? 'front' : 'back');
-                setZoom(1);
-              }}
+              accessibilityRole="button"
+              accessibilityLabel={s.a11y.flip}
+              onPress={() => setCameras(cameras === 'back' ? 'front' : 'back')}
             >
               <Text style={styles.roundText}>🔄</Text>
             </Pressable>
@@ -699,7 +755,7 @@ function LookHere({
   landscape: boolean;
   lensLeft: boolean;
 }) {
-  const pulse = useRef(new Animated.Value(1)).current;
+  const [pulse] = useState(() => new Animated.Value(1));
   useEffect(() => {
     const loop = Animated.loop(
       Animated.sequence([
@@ -733,6 +789,18 @@ function Grid({ rect }: { rect: ReturnType<typeof frameRect> }) {
       <View style={[styles.gridLine, styles.gridH, { top: '33.33%' }]} />
       <View style={[styles.gridLine, styles.gridH, { top: '66.67%' }]} />
     </View>
+  );
+}
+
+/**
+ * Sabit boyutlu yuvarlak tuşların yazısı. Sığmazsa kelimenin ortasından bölünmez, küçülür (uzun
+ * çeviriler ve büyük yazı boyutu ayarı için). Satır sayısı metindeki `\n`'lerden gelir.
+ */
+function FitText({ text, style }: { text: string; style: StyleProp<TextStyle> }) {
+  return (
+    <Text style={style} numberOfLines={text.split('\n').length} adjustsFontSizeToFit minimumFontScale={0.6}>
+      {text}
+    </Text>
   );
 }
 
@@ -781,8 +849,8 @@ const styles = StyleSheet.create({
   chipTextOn: { color: '#000' },
   dot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#ef4444', marginRight: 8 },
   dotPaused: { backgroundColor: '#9ca3af' },
-  toastWrap: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
-  toast: { color: '#fff', backgroundColor: '#000b', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, overflow: 'hidden' },
+  toastWrap: { position: 'absolute', left: 0, right: 0, paddingHorizontal: 24, alignItems: 'center' },
+  toast: { color: '#fff', backgroundColor: '#000b', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, overflow: 'hidden', textAlign: 'center' },
   captureWrap: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
   captureSwitch: { flexDirection: 'row', backgroundColor: '#000a', borderRadius: 18, padding: 3 },
   captureTab: { paddingHorizontal: 16, paddingVertical: 6, borderRadius: 15 },
@@ -793,6 +861,7 @@ const styles = StyleSheet.create({
   zoomChip: { minWidth: 36, height: 36, borderRadius: 18, paddingHorizontal: 6, backgroundColor: '#000a', alignItems: 'center', justifyContent: 'center' },
   zoomText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   zoomTextOn: { color: '#facc15' },
+  zoomHint: { color: '#facc15', fontSize: 16, fontWeight: '800', backgroundColor: '#000b', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 14, overflow: 'hidden' },
   controlsPortrait: {
     position: 'absolute', left: 0, right: 0,
     flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 28,
@@ -802,12 +871,16 @@ const styles = StyleSheet.create({
     flexDirection: 'column-reverse', justifyContent: 'center', alignItems: 'center', gap: 28,
   },
   side: { width: 64, height: 64, alignItems: 'center', justifyContent: 'center' },
-  modeButton: { width: 64, height: 64, borderRadius: 32, backgroundColor: '#000a', alignItems: 'center', justifyContent: 'center' },
+  modeButton: { width: 64, height: 64, borderRadius: 32, paddingHorizontal: 4, backgroundColor: '#000a', alignItems: 'center', justifyContent: 'center' },
   modeText: { color: '#fff', fontSize: 12, fontWeight: '700', textAlign: 'center' },
   recordOuter: { width: 78, height: 78, borderRadius: 39, borderWidth: 5, borderColor: '#fff', alignItems: 'center', justifyContent: 'center' },
   recordInner: { width: 60, height: 60, borderRadius: 30, backgroundColor: '#ef4444' },
   recordStop: { width: 30, height: 30, borderRadius: 6, backgroundColor: '#ef4444' },
-  photoInner: { width: 60, height: 60, borderRadius: 30, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+  photoInner: { width: 60, height: 60, borderRadius: 30, paddingHorizontal: 6, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
   photoInnerText: { color: '#000', fontSize: 13, fontWeight: '700' },
+  // Ön ışıkta zemin beyaz: deklanşör koyu olsun, kaybolmasın.
+  recordOuterLit: { borderColor: '#1c1c1e' },
+  photoInnerLit: { backgroundColor: '#1c1c1e' },
+  photoInnerTextLit: { color: '#fff' },
   snapInner: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#fff' },
 });

@@ -1,5 +1,5 @@
 Pod::Spec.new do |s|
-  s.name           = 'DualCamera'
+  s.name           = 'DualCameraKit'
   s.version        = '1.0.0'
   s.summary        = 'Ön + arka kamerayı aynı anda kaydeden Expo modülü'
   s.description    = 'AVCaptureMultiCamSession ile resim-içinde-resim video kaydı'

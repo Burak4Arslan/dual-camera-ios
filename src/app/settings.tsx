@@ -1,9 +1,10 @@
-import Constants from 'expo-constants';
 import { router, Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { appVersion } from '../../modules/dual-camera';
+import { CONTACT, contactMailUrl } from '../contact';
 import { useStrings } from '../i18n';
 import { LANGUAGE_NAMES, LANGUAGES } from '../i18n/strings';
 import { Settings, useSettings } from '../settings';
@@ -21,6 +22,8 @@ export default function SettingsScreen() {
   const s = useStrings();
   const settings = useSettings();
   const insets = useSafeAreaInsets();
+  const { version, build } = appVersion();
+  const versionText = build ? `${version} (${build})` : version;
   // Yatayda çentik tarafında içerik kesilmesin.
   const side = { paddingLeft: Math.max(insets.left, 16), paddingRight: Math.max(insets.right, 16) };
 
@@ -98,7 +101,7 @@ export default function SettingsScreen() {
           <Pressable
             key={layout}
             style={[styles.row, i > 0 && styles.rowBorder]}
-            // Sahneye yerleştir yalnızca tek videoyla anlamlı; seçilince tek video da açılır.
+            // Sahneye yerleştir yalnızca tek dosyayla anlamlı; seçilince tek dosya da açılır.
             onPress={() => settings.update(layout === 'cutout' ? { layout, combineVideo: true } : { layout })}
           >
             <View style={styles.rowLabel}>
@@ -148,9 +151,29 @@ export default function SettingsScreen() {
       <View style={styles.section}>
         <View style={styles.row}>
           <Text style={styles.rowText}>{s.settings.version}</Text>
-          <Text style={styles.value}>{Constants.expoConfig?.version}</Text>
+          <Text style={styles.value}>{versionText}</Text>
         </View>
+        <Pressable
+          style={[styles.row, styles.rowBorder]}
+          accessibilityRole="link"
+          onPress={() => Linking.openURL(contactMailUrl(s.appName, versionText))}
+        >
+          <View style={styles.rowLabel}>
+            <Text style={styles.rowText}>{s.settings.contact}</Text>
+            <Text style={styles.hint}>{CONTACT.email}</Text>
+          </View>
+          <Text style={styles.chevron}>›</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.row, styles.rowBorder]}
+          accessibilityRole="link"
+          onPress={() => router.push('/privacy')}
+        >
+          <Text style={styles.rowText}>{s.settings.privacy}</Text>
+          <Text style={styles.chevron}>›</Text>
+        </Pressable>
       </View>
+      <Text style={styles.footer}>© 2026 {CONTACT.developer}</Text>
     </ScrollView>
   );
 }
@@ -168,4 +191,6 @@ const styles = StyleSheet.create({
   hint: { color: '#8e8e93', fontSize: 13 },
   value: { color: '#8e8e93', fontSize: 16 },
   check: { color: '#0a84ff', fontSize: 17, fontWeight: '600' },
+  chevron: { color: '#636366', fontSize: 22 },
+  footer: { color: '#636366', fontSize: 12, textAlign: 'center', marginTop: 24 },
 });

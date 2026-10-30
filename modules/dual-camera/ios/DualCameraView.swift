@@ -10,7 +10,8 @@ import Vision
 
 // Önizlemede arka kamera tam kare, ön kamera (yüz) sağ üst köşede küçük pencere.
 // Kayıtta iki kamera iki ayrı video dosyası olur (kurguda yerleştirmek için); ayarlarda
-// "tek video" seçiliyse yüz, önizlemedeki gibi sahnenin köşesine yerleştirilip tek dosya yazılır.
+// "tek dosya" seçiliyse yüz, önizlemedeki gibi sahnenin köşesine yerleştirilip tek dosya yazılır
+// (video da foto da).
 private enum Pip {
   static let longSideRatio: CGFloat = 0.28 // karenin uzun kenarına oranla
   static let marginRatio: CGFloat = 0.045  // karenin kısa kenarına oranla
@@ -53,6 +54,8 @@ enum DualCameraError: LocalizedError {
   case audioSession(String)
   case runtime(String)
   case recordFailed(String)
+  /// Galeriye aktarılamadı ama dosya duruyor; uygulama tekrar açılınca yeniden denenir.
+  case savePending(String)
 
   var code: String {
     switch self {
@@ -69,13 +72,14 @@ enum DualCameraError: LocalizedError {
     case .audioSession: return "audioSession"
     case .runtime: return "runtime"
     case .recordFailed: return "recordFailed"
+    case .savePending: return "savePending"
     }
   }
 
   var detail: String? {
     switch self {
     case .writerFailed(let d), .saveFailed(let d), .torchFailed(let d), .audioSession(let d),
-      .runtime(let d), .recordFailed(let d):
+      .runtime(let d), .recordFailed(let d), .savePending(let d):
       return d.isEmpty ? nil : d
     default:
       return nil
@@ -105,10 +109,11 @@ private final class Track {
   private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
   private var audioInput: AVAssetWriterInput?
   private(set) var lastVideoTime: CMTime?
+  /// Yazıcı hata verdi ama o ana kadarki kısım kurtarıldı.
+  private(set) var salvaged = false
 
   init(name: String, composited: Bool = false) {
-    url = FileManager.default.temporaryDirectory
-      .appendingPathComponent("dualcam-\(name)-\(UUID().uuidString).mov")
+    url = PendingRecordings.newURL(name: name)
     self.composited = composited
   }
 
@@ -118,6 +123,9 @@ private final class Track {
   func start(firstFrame: CMSampleBuffer, at start: CMTime, audioSettings: [String: Any]?) throws {
     guard let image = CMSampleBufferGetImageBuffer(firstFrame) else { throw DualCameraError.tooShort }
     let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+    // Video her 2 sn'de bir diske kesinleşir: uygulama çökse ya da yazıcı hata verse bile o ana
+    // kadarki kısım oynatılabilir kalır (bir sonraki açılışta galeriye kurtarılır).
+    writer.movieFragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
     let width = CVPixelBufferGetWidth(image)
     let height = CVPixelBufferGetHeight(image)
 
@@ -209,12 +217,16 @@ private final class Track {
   /// Yazıcı kurulamadıysa tekrar denenmesin diye işaretlenir.
   var failed = false
 
-  /// Dosyayı kapatır; başarılıysa URL'yi döner.
+  /// Dosyayı kapatır ve URL'sini döner. Yazıcı hata verdiyse dosya silinmez: o ana kadar
+  /// diske kesinleşen kısım kurtarılır (`salvaged`). Hiç kare yazılamadıysa hata döner.
   func finish(completion: @escaping (Result<URL, Error>) -> Void) {
-    guard let writer, writer.status == .writing, lastVideoTime != nil else {
+    guard let writer, lastVideoTime != nil else {
       discard()
-      completion(.failure(writer?.error.map { DualCameraError.writerFailed($0.localizedDescription) }
-        ?? DualCameraError.tooShort))
+      completion(.failure(DualCameraError.tooShort))
+      return
+    }
+    guard writer.status == .writing else {
+      salvage(writer.error, completion: completion)
       return
     }
     videoInput?.markAsFinished()
@@ -223,12 +235,23 @@ private final class Track {
       if writer.status == .completed {
         completion(.success(url))
       } else {
-        discard()
-        completion(.failure(DualCameraError.writerFailed(writer.error?.localizedDescription ?? "")))
+        salvage(writer.error, completion: completion)
       }
     }
   }
 
+  private func salvage(_ error: Error?, completion: @escaping (Result<URL, Error>) -> Void) {
+    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    if size > 0 {
+      salvaged = true
+      completion(.success(url))
+    } else {
+      discard()
+      completion(.failure(DualCameraError.writerFailed(error?.localizedDescription ?? "")))
+    }
+  }
+
+  /// Yalnızca içinde hiç kare olmayan dosya için.
   func discard() {
     try? FileManager.default.removeItem(at: url)
   }
@@ -357,11 +380,20 @@ private final class PipCompositor {
     scene: CVPixelBuffer, face: CVPixelBuffer?, mask personMask: CVPixelBuffer?, layout: CompositeLayout,
     into output: CVPixelBuffer
   ) {
-    let sceneImage = CIImage(cvPixelBuffer: scene)
+    let image = compose(
+      scene: CIImage(cvPixelBuffer: scene), face: face.map { CIImage(cvPixelBuffer: $0) },
+      mask: personMask.map { CIImage(cvPixelBuffer: $0) }, layout: layout)
+    context.render(image, to: output)
+  }
+
+  /// Video karesi ya da tam çözünürlüklü foto için ortak çizim. Sahnenin kapladığı alan (0,0)'dan
+  /// başlamalı; sonuç o alana kırpılır.
+  func compose(scene sceneImage: CIImage, face faceImage: CIImage?, mask personMask: CIImage?, layout: CompositeLayout)
+    -> CIImage
+  {
     let frame = sceneImage.extent
     var image = sceneImage
-    if let face {
-      let faceImage = CIImage(cvPixelBuffer: face)
+    if let faceImage {
       let (big, small) = layout.swapped ? (faceImage, sceneImage) : (sceneImage, faceImage)
       switch layout.layout {
       case .cutout:
@@ -386,13 +418,12 @@ private final class PipCompositor {
         image = rounded.composited(over: border.composited(over: Self.fill(big, into: frame)))
       }
     }
-    context.render(image.cropped(to: frame), to: output)
+    return image.cropped(to: frame)
   }
 
   /// Kişiyi arka planından ayırır: maske kareye ölçeklenir, kenarları hafifçe yumuşatılır; kişinin
   /// dışı saydam kalır.
-  static func cutout(_ face: CIImage, mask: CVPixelBuffer) -> CIImage {
-    let maskImage = CIImage(cvPixelBuffer: mask)
+  static func cutout(_ face: CIImage, mask maskImage: CIImage) -> CIImage {
     let scaled = maskImage
       .transformed(by: CGAffineTransform(
         scaleX: face.extent.width / maskImage.extent.width, y: face.extent.height / maskImage.extent.height))
@@ -441,6 +472,44 @@ private final class PipCompositor {
     generator.radius = Float(radius)
     generator.color = .white
     return generator.outputImage ?? .empty()
+  }
+}
+
+/// Ön+Arka tek foto: iki kameranın tam çözünürlüklü fotoğrafını ekrandaki düzenle (tek videodaki
+/// gibi) tek fotoğrafta birleştirir. Ana thread dışında çağrılır; kişi ayırma ~1 sn sürebilir.
+private enum PhotoCombiner {
+  private static let context = CIContext(options: [.cacheIntermediates: false])
+
+  /// Olmazsa (ör. sahneye yerleştirde kişi bulunamadı) nil: fotoğraflar ayrı kaydedilir, kaybolmaz.
+  static func combine(scene: Data, face: Data, layout: CompositeLayout) -> Data? {
+    // Fotoğraflar yön bilgisiyle (EXIF) gelir; çekim yönüne çevrilir, alan (0,0)'dan başlar.
+    guard let sceneImage = upright(scene), let faceImage = upright(face) else { return nil }
+    var mask: CIImage?
+    if layout.layout == .cutout {
+      guard let personMask = personMask(in: faceImage) else { return nil }
+      mask = personMask
+    }
+    let image = PipCompositor().compose(scene: sceneImage, face: faceImage, mask: mask, layout: layout)
+    let space = sceneImage.colorSpace ?? CGColorSpace(name: CGColorSpace.displayP3)!
+    let quality = [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9]
+    return context.heifRepresentation(of: image, format: .RGBA8, colorSpace: space, options: quality)
+      ?? context.jpegRepresentation(of: image, colorSpace: space, options: quality)
+  }
+
+  private static func upright(_ data: Data) -> CIImage? {
+    guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return nil }
+    return image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+  }
+
+  /// Fotoğraf için en doğru kişi maskesi (önizlemedeki hızlı ayırmadan daha keskin).
+  private static func personMask(in face: CIImage) -> CIImage? {
+    let request = VNGeneratePersonSegmentationRequest()
+    request.qualityLevel = .accurate
+    request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+    guard (try? VNImageRequestHandler(ciImage: face).perform([request])) != nil,
+      let mask = request.results?.first?.pixelBuffer
+    else { return nil }
+    return CIImage(cvPixelBuffer: mask)
   }
 }
 
@@ -780,6 +849,7 @@ final class DualCameraView: ExpoView,
   let onCameraError = EventDispatcher()
   let onAutoStopped = EventDispatcher()
   let onZoomRange = EventDispatcher()
+  let onZoomChange = EventDispatcher()
   let onAudioLevel = EventDispatcher()
   let onPipMove = EventDispatcher()
   let onHardwareButton = EventDispatcher()
@@ -821,8 +891,14 @@ final class DualCameraView: ExpoView,
   private var activeMode: CameraMode = .both
   private var activeKind: CaptureKind = .video
   private var torchWanted = false
-  private var zoomWanted: CGFloat = 1
+  /// Her kamera kendi yakınlaştırmasını hatırlar; düğmeler ve iki parmak büyük görüntüdekini değiştirir.
+  private var backZoom: CGFloat = 1
+  private var frontZoom: CGFloat = 1
+  /// Büyük görüntüde (yakınlaştırılan) ön kamera var: ön modu ya da Ön+Arka'da yer değiştirilmiş.
+  private var zoomOnFront = false
   private let maxZoom: CGFloat = 10
+  /// Ön kamerada yakınlaştırma tamamen dijital (kırpma); ötesi çok bulanık.
+  private let maxFrontZoom: CGFloat = 3
   private var shots = Set<PhotoShot>() // çekimi süren fotolar (çıkış yalnızca zayıf tutar)
 
   // Ana thread üzerinde kullanılır.
@@ -845,6 +921,12 @@ final class DualCameraView: ExpoView,
   private lazy var pipPan = UIPanGestureRecognizer(target: self, action: #selector(pipPanned(_:)))
   private lazy var pipTap = UITapGestureRecognizer(target: self, action: #selector(swapTapped))
   private lazy var mainTap = UITapGestureRecognizer(target: self, action: #selector(swapTapped))
+  /// İki parmakla yakınlaştırma; önizlemenin her yerinde (küçük pencerenin üstünde de).
+  private lazy var zoomPinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
+  /// Büyük görüntüdeki kameranın yakınlaştırması ve sınırları (ana thread kopyası); iki parmak buradan başlar.
+  private var zoomShown: CGFloat = 1
+  private var zoomLimits: (min: CGFloat, max: CGFloat) = (1, 10)
+  private var pinchStartZoom: CGFloat = 1
   private var buttonInteraction: UIInteraction?
   private var lastOrientationName: String?
 
@@ -884,6 +966,9 @@ final class DualCameraView: ExpoView,
     pipContainer.addGestureRecognizer(pipPan)
     pipContainer.addGestureRecognizer(pipTap)
     mainContainer.addGestureRecognizer(mainTap)
+    // Pencere tek parmakla sürüklenir; iki parmak yakınlaştırmaya kalır.
+    pipPan.maximumNumberOfTouches = 1
+    addGestureRecognizer(zoomPinch)
     miniContainer.clipsToBounds = true
     miniContainer.layer.borderColor = UIColor.white.cgColor
     miniContainer.layer.borderWidth = 1
@@ -1046,6 +1131,7 @@ final class DualCameraView: ExpoView,
     layout = newLayout
     setNeedsLayout()
     syncRecordingLayout()
+    syncZoomTarget()
   }
 
   /// JS'ten (kaydedilmiş ayardan) pencerenin yeri; nil = sağ üst köşe. Sürüklerken yok sayılır.
@@ -1087,6 +1173,7 @@ final class DualCameraView: ExpoView,
       self.layoutIfNeeded()
     }
     syncRecordingLayout()
+    syncZoomTarget()
   }
 
   /// Kişi ayırma yalnızca "sahneye yerleştir" açıkken çalışır (pil). Önizleme pencere boyutunda çizilir.
@@ -1106,7 +1193,7 @@ final class DualCameraView: ExpoView,
   private func renderCutoutPreview() {
     guard let latest = segmenter.latest, cutoutPreviewSize.width > 0, cutoutPreviewSize.height > 0 else { return }
     let target = CGRect(origin: .zero, size: cutoutPreviewSize)
-    let person = PipCompositor.cutout(CIImage(cvPixelBuffer: latest.face), mask: latest.mask)
+    let person = PipCompositor.cutout(CIImage(cvPixelBuffer: latest.face), mask: CIImage(cvPixelBuffer: latest.mask))
     guard let image = previewContext.createCGImage(PipCompositor.fill(person, into: target), from: target) else { return }
     DispatchQueue.main.async { [weak self] in
       CATransaction.begin()
@@ -1171,9 +1258,11 @@ final class DualCameraView: ExpoView,
     }
     mode = newMode
     setNeedsLayout()
+    let zoomFront = zoomTargetIsFront
     sessionQueue.async { [weak self] in
       guard let self else { return }
       self.activeMode = newMode
+      self.zoomOnFront = zoomFront
       self.applyCameraMode()
       self.applyTorch()
       self.applyZoom()
@@ -1197,19 +1286,42 @@ final class DualCameraView: ExpoView,
       }
       self.applyCameraMode()
       self.session.commitConfiguration()
-      // Format değişince ışık sönebiliyor, yakınlaştırma da 1x'e döner.
+      // Format değişince ışık sönebiliyor, yakınlaştırma da 1x'e döner (sınırı da değişebilir).
       self.applyTorch()
       self.applyZoom()
+      self.emitZoomRange()
     }
   }
 
-  /// JS'ten gelen yakınlaştırma (1 = normal). Kayıt sırasında da değişebilir.
+  /// JS'ten gelen yakınlaştırma (1 = normal), büyük görüntüdeki kameraya. Kayıt sırasında da
+  /// değişebilir. İki parmak sürerken yok sayılır: JS'e giden değerler geride kalıp geri gelince
+  /// görüntü titremesin.
   func setZoom(_ value: Double) {
+    guard zoomPinch.state != .began, zoomPinch.state != .changed else { return }
+    zoomShown = CGFloat(value)
+    sessionQueue.async { [weak self] in self?.setTargetZoom(CGFloat(value)) }
+  }
+
+  /// Ana thread'de: büyük görüntüde ön kamera mı (bölünmüşte sol / üst yarı).
+  private var zoomTargetIsFront: Bool {
+    mode == .front || (mode == .both && swapped && layout != .cutout)
+  }
+
+  /// Yer değiştirince ya da düzen değişince yakınlaştırma büyük görüntüdeki kameraya geçer; JS o
+  /// kameranın aralığını ve hatırlanan değerini alır.
+  private func syncZoomTarget() {
+    let front = zoomTargetIsFront
     sessionQueue.async { [weak self] in
-      guard let self else { return }
-      self.zoomWanted = CGFloat(value)
-      self.applyZoom()
+      guard let self, self.zoomOnFront != front else { return }
+      self.zoomOnFront = front
+      self.emitZoomRange()
     }
+  }
+
+  /// sessionQueue üzerinde çağrılır.
+  private func setTargetZoom(_ zoom: CGFloat) {
+    if zoomOnFront { frontZoom = zoom } else { backZoom = zoom }
+    applyZoom()
   }
 
   /// Ekrandaki yakınlaştırma (1x = geniş açı lens) ile cihazın `videoZoomFactor`'ü arasındaki çarpan.
@@ -1222,29 +1334,53 @@ final class DualCameraView: ExpoView,
     return CGFloat(truncating: wide)
   }
 
-  private var mainCamera: CameraLinks? { activeMode == .front ? front : back }
-
-  /// sessionQueue üzerinde çağrılır. JS yakınlaştırma düğmelerini buna göre gösterir (0,5x yalnızca
-  /// ultra geniş lens varsa).
-  private func emitZoomRange() {
-    guard let device = mainCamera?.device else { return }
-    let scale = zoomScale(device)
-    let range: [String: Any] = [
-      "min": Double(device.minAvailableVideoZoomFactor / scale),
-      "max": Double(min(device.maxAvailableVideoZoomFactor / scale, maxZoom)),
-    ]
-    DispatchQueue.main.async { [weak self] in self?.onZoomRange(range) }
+  private func zoomCap(_ device: AVCaptureDevice) -> CGFloat {
+    device.position == .front ? maxFrontZoom : maxZoom
   }
 
-  /// sessionQueue üzerinde çağrılır. Yakınlaştırma tam ekrandaki kameraya uygulanır (ön modunda ön
-  /// kamera, yoksa arka); küçük penceredeki yüz kamerası hep 1x kalır. Sanal kamera 3x'ten sonra
-  /// tele lense geçer; ötesi dijital olduğu için 10x ile sınırlı.
+  /// sessionQueue üzerinde çağrılır. Büyük görüntüdeki kameranın aralığı ve hatırlanan değeri; JS
+  /// yakınlaştırma düğmelerini buna göre gösterir (0,5x yalnızca ultra geniş lens varsa).
+  private func emitZoomRange() {
+    guard let device = (zoomOnFront ? front : back)?.device else { return }
+    let scale = zoomScale(device)
+    let limits = (
+      min: device.minAvailableVideoZoomFactor / scale,
+      max: min(device.maxAvailableVideoZoomFactor / scale, zoomCap(device))
+    )
+    let zoom = min(max(zoomOnFront ? frontZoom : backZoom, limits.min), limits.max)
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.zoomLimits = limits
+      self.zoomShown = zoom
+      self.onZoomRange(["min": Double(limits.min), "max": Double(limits.max), "zoom": Double(zoom)])
+    }
+  }
+
+  /// İki parmak: kamera doğrudan burada yakınlaşır (akıcı olsun), JS yalnızca değeri gösterir.
+  /// `active` parmaklar ekrandayken true.
+  @objc private func pinched(_ pinch: UIPinchGestureRecognizer) {
+    switch pinch.state {
+    case .began:
+      pinchStartZoom = zoomShown
+    case .changed, .ended:
+      let zoom = min(max(pinchStartZoom * pinch.scale, zoomLimits.min), zoomLimits.max)
+      zoomShown = zoom
+      sessionQueue.async { [weak self] in self?.setTargetZoom(zoom) }
+      onZoomChange(["zoom": Double(zoom), "active": pinch.state == .changed])
+    case .cancelled, .failed:
+      onZoomChange(["zoom": Double(zoomShown), "active": false])
+    default:
+      break
+    }
+  }
+
+  /// sessionQueue üzerinde çağrılır. Her kamera kendi değerinde (küçük penceredeyken de). Arka sanal
+  /// kamera 3x'ten sonra tele lense geçer; ötesi dijital olduğu için 10x ile, ön kamera 3x ile sınırlı.
   private func applyZoom() {
-    let other = activeMode == .front ? back : front
-    for (links, zoom) in [(mainCamera, zoomWanted), (other, 1)] {
+    for (links, zoom) in [(back, backZoom), (front, frontZoom)] {
       guard let device = links?.device else { continue }
       let scale = zoomScale(device)
-      let upper = min(device.maxAvailableVideoZoomFactor, maxZoom * scale)
+      let upper = min(device.maxAvailableVideoZoomFactor, zoomCap(device) * scale)
       let clamped = min(max(zoom * scale, device.minAvailableVideoZoomFactor), upper)
       guard device.videoZoomFactor != clamped else { continue }
       do {
@@ -1625,7 +1761,6 @@ final class DualCameraView: ExpoView,
 
   // MARK: - Kayıt
 
-  /// JS'ten (ayarlardan): Ön+Arka kayıt tek video mu olsun. Sonraki kayıtta geçerli olur.
   func setNoiseReduction(_ enabled: Bool) {
     dataQueue.async { [weak self] in
       guard let self else { return }
@@ -1633,6 +1768,7 @@ final class DualCameraView: ExpoView,
     }
   }
 
+  /// JS'ten (ayarlardan): Ön+Arka tek dosya mı olsun (video ve foto). Sonraki çekimde geçerli olur.
   func setCombine(_ value: Bool) {
     combine = value
   }
@@ -1718,39 +1854,28 @@ final class DualCameraView: ExpoView,
         completion(.failure(firstError ?? DualCameraError.tooShort))
         return
       }
-      Self.saveToPhotos({
-        for url in saved {
-          PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
-        }
-      }) { error in
-        saved.forEach { try? FileManager.default.removeItem(at: $0) }
+      // Dosyalar yalnızca galeriye aktarılınca silinir; olmazsa bir sonraki açılışta yeniden denenir.
+      let recovered = tracks.contains { $0.salvaged }
+      PendingRecordings.saveToPhotos(saved) { error in
         if let error {
           completion(.failure(error))
         } else {
-          completion(.success(["duration": duration, "files": saved.count]))
+          completion(.success(["duration": duration, "files": saved.count, "recovered": recovered]))
         }
-      }
-    }
-  }
-
-  private static func saveToPhotos(_ changes: @escaping () -> Void, completion: @escaping (Error?) -> Void) {
-    PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-      guard status == .authorized || status == .limited else {
-        completion(DualCameraError.photosDenied)
-        return
-      }
-      PHPhotoLibrary.shared().performChanges(changes) { ok, error in
-        completion(ok ? nil : DualCameraError.saveFailed(error?.localizedDescription ?? ""))
       }
     }
   }
 
   // MARK: - Foto
 
-  /// Seçili kameralarla birer foto çeker ve ayrı ayrı galeriye kaydeder (önce sahne, sonra yüz).
+  /// Seçili kameralarla birer foto çeker ve galeriye kaydeder (önce sahne, sonra yüz). Ön+Arka'da
+  /// "tek dosya" açıksa (ya da sahneye yerleştirde) iki foto ekrandaki düzenle tek fotoğraf olur.
   /// Video kaydı sürerken de çalışır; o zaman deklanşör sesi (destekleniyorsa) çıkmaz.
   func takePhoto(completion: @escaping (Result<[String: Any], Error>) -> Void) {
     let silent = isRecording
+    let combined = combine || layout == .cutout
+      ? CompositeLayout(layout: layout, swapped: swapped && layout != .cutout, pip: pipCenter)
+      : nil
     sessionQueue.async { [weak self] in
       guard let self else { return }
       let outputs = [
@@ -1761,29 +1886,50 @@ final class DualCameraView: ExpoView,
         DispatchQueue.main.async { completion(.failure(DualCameraError.photoFailed)) }
         return
       }
+      let combined = outputs.count == 2 ? combined : nil
       let shot = PhotoShot(outputs: outputs, queue: self.sessionQueue) { [weak self] shot, photos, error in
         self?.shots.remove(shot)
         guard !photos.isEmpty else {
           DispatchQueue.main.async { completion(.failure(error ?? DualCameraError.photoFailed)) }
           return
         }
-        Self.saveToPhotos({
-          for data in photos {
-            PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
+        // Birleştirme kamerayı bekletmesin diye ayrı kuyrukta.
+        DispatchQueue.global(qos: .userInitiated).async {
+          var photos = photos
+          if let combined, photos.count == 2,
+            let single = PhotoCombiner.combine(scene: photos[0], face: photos[1], layout: combined)
+          {
+            photos = [single]
           }
-        }) { error in
-          DispatchQueue.main.async {
-            if let error {
-              completion(.failure(error))
-            } else {
-              completion(.success(["files": photos.count]))
-            }
-          }
+          Self.save(photos, completion: completion)
         }
       }
       self.shots.insert(shot)
       for output in outputs {
         output.capturePhoto(with: Self.photoSettings(for: output, silent: silent), delegate: shot)
+      }
+    }
+  }
+
+  /// Önce diske: galeriye aktarma olmazsa foto kaybolmaz, bir sonraki açılışta kurtarılır.
+  private static func save(_ photos: [Data], completion: @escaping (Result<[String: Any], Error>) -> Void) {
+    var files: [URL] = []
+    for data in photos {
+      let url = PendingRecordings.photoURL(for: data)
+      if (try? data.write(to: url, options: .atomic)) != nil { files.append(url) }
+    }
+    guard files.count == photos.count else {
+      PendingRecordings.remove(files)
+      DispatchQueue.main.async { completion(.failure(DualCameraError.photoFailed)) }
+      return
+    }
+    PendingRecordings.saveToPhotos(files) { error in
+      DispatchQueue.main.async {
+        if let error {
+          completion(.failure(error))
+        } else {
+          completion(.success(["files": photos.count]))
+        }
       }
     }
   }
