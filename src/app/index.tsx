@@ -31,6 +31,7 @@ import {
 import { errorText, fill, useLanguage, useStrings } from '../i18n';
 import type { Language, Strings } from '../i18n/strings';
 import { photosLeft, useFreeSpace, videoSecondsLeft } from '../hooks/useFreeSpace';
+import { useRemembered } from '../hooks/useRemembered';
 import { useScreenDimmer } from '../hooks/useScreenDimmer';
 import { useSettings } from '../settings';
 
@@ -136,9 +137,10 @@ export default function CameraScreen() {
   // sola yatırınca (arayüz landscapeLeft) sol el. Ayarlar ve göstergeler karşı köşeye geçer.
   const [uiOrientation, setUiOrientation] = useState<InterfaceOrientation>('unknown');
   const controlsLeft = landscape && uiOrientation === 'landscapeLeft';
-  const [mode, setMode] = useState<Mode>('landscape');
-  const [capture, setCapture] = useState<CaptureMode>('video');
-  const [cameras, setCameraSelection] = useState<CameraMode>('both');
+  // Son seçilen yön, çekim türü ve kamera hatırlanır; uygulama aynısıyla açılır.
+  const [mode, setMode] = useRemembered<Mode>('mode', 'landscape', ['landscape', 'portrait']);
+  const [capture, setCapture] = useRemembered<CaptureMode>('capture', 'video', CAPTURE_MODES);
+  const [cameras, setCameraSelection] = useRemembered<CameraMode>('cameras', 'both', ['both', 'back', 'front']);
   const [torch, setTorch] = useState(false);
   /** Ön ışık: ekran tam parlak ve beyaz, önizleme ortada küçük; yüzü aydınlatır. Kayda etkisi yok. */
   const [frontLight, setFrontLight] = useState(false);
