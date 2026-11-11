@@ -66,7 +66,7 @@ FOTOĞRAF
 • Aralıklı çekim: 1–60 saniyede bir, sen durdurana kadar.
 
 KAMERA
-• 0,5×'ten 10×'a yakınlaştırma, iki parmakla ya da hızlı düğmelerle.
+• 0,5×'ten telefonun desteklediği en yüksek değere (Pro modellerde 25×'e kadar) yakınlaştırma, iki parmakla ya da hızlı düğmelerle.
 • Arka kamera ışığı ve yüzünü aydınlatan ön ışık.
 • Göz teması penceresi: Görüntünün küçük bir kopyası lensin yanında durur, kameraya bakarak konuşursun.
 • Izgara çizgileri, yatay/dikey kilit, tuşlar tuttuğun elin tarafında.
@@ -113,7 +113,7 @@ PHOTOS
 • Interval shooting: every 1–60 seconds until you stop.
 
 CAMERA
-• Zoom from 0.5× to 10× with a pinch or quick buttons.
+• Zoom from 0.5× up to your iPhone's maximum (up to 25× on Pro models) with a pinch or quick buttons.
 • Back camera light and a front light that brightens your face.
 • Eye contact window: a small copy of the preview sits next to the lens, so you look at the camera while you talk.
 • Grid lines, landscape/portrait lock, controls on the side of the hand holding the phone.

@@ -44,10 +44,10 @@ const NEXT_CAMERA: Record<CameraMode, CameraMode> = { both: 'back', back: 'front
 const CAPTURE_MODES: CaptureMode[] = ['video', 'photo'];
 /** Aralıklı çekim seçenekleri (saniye). 0 = kapalı: deklanşör tek foto çeker. */
 const INTERVALS = [0, 1, 2, 3, 5, 10, 30, 60];
-/** Yakınlaştırma sınırı; ötesi dijital ve çok bulanık. */
+/** Kamera açılana kadarki varsayılan sınır; gerçeğini cihaza göre native taraf bildirir (onZoomRange). */
 const MAX_ZOOM = 10;
 /** Hızlı yakınlaştırma düğmeleri; cihazın aralığında olanlar gösterilir, sonuna "Maks" eklenir. */
-const ZOOM_PRESETS = [0.5, 1, 2, 5];
+const ZOOM_PRESETS = [0.5, 1, 2, 5, 10];
 /** Yakınlaştırma düğmelerinin üstünde parmak bu kadar (pt) sağa kayınca yakınlaştırma iki katına çıkar. */
 const ZOOM_SCRUB_DOUBLING = 70;
 

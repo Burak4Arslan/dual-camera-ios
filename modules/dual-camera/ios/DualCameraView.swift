@@ -896,7 +896,11 @@ final class DualCameraView: ExpoView,
   private var frontZoom: CGFloat = 1
   /// Büyük görüntüde (yakınlaştırılan) ön kamera var: ön modu ya da Ön+Arka'da yer değiştirilmiş.
   private var zoomOnFront = false
+  /// Tele lensi olmayan arka kamerada yakınlaştırma sınırı (tele varsa `backZoomCap`).
   private let maxZoom: CGFloat = 10
+  /// Tele lensli arka kamerada sınır, iPhone'un Kamera uygulamasındaki gibi tele lensin bu katı:
+  /// 3× tele → 15×, 5× tele → 25×.
+  private let teleZoomMultiplier: CGFloat = 5
   /// Ön kamerada yakınlaştırma tamamen dijital (kırpma); ötesi çok bulanık.
   private let maxFrontZoom: CGFloat = 3
   private var shots = Set<PhotoShot>() // çekimi süren fotolar (çıkış yalnızca zayıf tutar)
@@ -1335,7 +1339,17 @@ final class DualCameraView: ExpoView,
   }
 
   private func zoomCap(_ device: AVCaptureDevice) -> CGFloat {
-    device.position == .front ? maxFrontZoom : maxZoom
+    device.position == .front ? maxFrontZoom : backZoomCap(device)
+  }
+
+  /// Arka kameranın üst sınırı, ekrandaki ölçekte (1 = geniş lens). Sanal kameranın son geçiş noktası
+  /// tele lensin başladığı yerdir; telefon ne kadar destekliyorsa (`maxAvailableVideoZoomFactor`) onunla
+  /// ayrıca sınırlanır.
+  private func backZoomCap(_ device: AVCaptureDevice) -> CGFloat {
+    guard device.constituentDevices.contains(where: { $0.deviceType == .builtInTelephotoCamera }),
+      let tele = device.virtualDeviceSwitchOverVideoZoomFactors.last
+    else { return maxZoom }
+    return max(maxZoom, CGFloat(truncating: tele) / zoomScale(device) * teleZoomMultiplier)
   }
 
   /// sessionQueue üzerinde çağrılır. Büyük görüntüdeki kameranın aralığı ve hatırlanan değeri; JS
@@ -1375,7 +1389,7 @@ final class DualCameraView: ExpoView,
   }
 
   /// sessionQueue üzerinde çağrılır. Her kamera kendi değerinde (küçük penceredeyken de). Arka sanal
-  /// kamera 3x'ten sonra tele lense geçer; ötesi dijital olduğu için 10x ile, ön kamera 3x ile sınırlı.
+  /// kamera tele lense geçtikten sonrası dijital; sınır `backZoomCap`, ön kamera 3x ile sınırlı.
   private func applyZoom() {
     for (links, zoom) in [(back, backZoom), (front, frontZoom)] {
       guard let device = links?.device else { continue }
