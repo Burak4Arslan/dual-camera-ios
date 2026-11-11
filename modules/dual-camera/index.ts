@@ -89,6 +89,7 @@ export type InterfaceOrientation =
 const DualCameraModule = requireNativeModule<{
   isSupported(): boolean;
   requestPermissions(): Promise<{ camera: boolean; microphone: boolean }>;
+  permissionsGranted(): { camera: boolean; microphone: boolean };
   getInterfaceOrientation(): Promise<InterfaceOrientation>;
   setScreenBrightness(level: ScreenBrightness): Promise<void>;
   getFreeSpace(): Promise<number>;
@@ -98,6 +99,8 @@ const DualCameraModule = requireNativeModule<{
 
 export const isSupported = () => DualCameraModule.isSupported();
 export const requestPermissions = () => DualCameraModule.requestPermissions();
+/** Eşzamanlı: izinler daha önce verildiyse açılışta bekleme ekranı hiç görünmez. */
+export const permissionsGranted = () => DualCameraModule.permissionsGranted();
 export const getInterfaceOrientation = () => DualCameraModule.getInterfaceOrientation();
 /** Ekran parlaklığı: loş (uzun çekimde pil), tam (ön ışık) ya da kullanıcının ayarı. */
 export const setScreenBrightness = (level: ScreenBrightness) => DualCameraModule.setScreenBrightness(level);

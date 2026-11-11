@@ -24,6 +24,7 @@ import {
   DualCameraView,
   getInterfaceOrientation,
   isSupported,
+  permissionsGranted,
   recoverRecordings,
   requestPermissions,
   setScreenBrightness,
@@ -31,7 +32,7 @@ import {
 import { errorText, fill, useLanguage, useStrings } from '../i18n';
 import type { Language, Strings } from '../i18n/strings';
 import { photosLeft, useFreeSpace, videoSecondsLeft } from '../hooks/useFreeSpace';
-import { useRemembered } from '../hooks/useRemembered';
+import { readRemembered, useRemembered } from '../hooks/useRemembered';
 import { useScreenDimmer } from '../hooks/useScreenDimmer';
 import { useSettings } from '../settings';
 
@@ -39,6 +40,15 @@ const { OrientationLock } = ScreenOrientation;
 
 type Mic = { name: string; external: boolean };
 type Mode = 'landscape' | 'portrait';
+const MODES: Mode[] = ['landscape', 'portrait'];
+
+// Açılışta ekranı hatırlanan yöne, ilk kare çizilmeden kilitle: önce dikey açılıp sonra yataya
+// dönmesin. (Bileşendeki etki de aynı kilidi koyar; bu yalnızca onu öne alır.)
+ScreenOrientation.lockAsync(
+  readRemembered<Mode>('mode', 'landscape', MODES) === 'landscape'
+    ? OrientationLock.LANDSCAPE
+    : OrientationLock.PORTRAIT_UP,
+).catch(() => {});
 
 const NEXT_CAMERA: Record<CameraMode, CameraMode> = { both: 'back', back: 'front', front: 'both' };
 const CAPTURE_MODES: CaptureMode[] = ['video', 'photo'];
@@ -138,7 +148,7 @@ export default function CameraScreen() {
   const [uiOrientation, setUiOrientation] = useState<InterfaceOrientation>('unknown');
   const controlsLeft = landscape && uiOrientation === 'landscapeLeft';
   // Son seçilen yön, çekim türü ve kamera hatırlanır; uygulama aynısıyla açılır.
-  const [mode, setMode] = useRemembered<Mode>('mode', 'landscape', ['landscape', 'portrait']);
+  const [mode, setMode] = useRemembered<Mode>('mode', 'landscape', MODES);
   const [capture, setCapture] = useRemembered<CaptureMode>('capture', 'video', CAPTURE_MODES);
   const [cameras, setCameraSelection] = useRemembered<CameraMode>('cameras', 'both', ['both', 'back', 'front']);
   const [torch, setTorch] = useState(false);
@@ -176,8 +186,15 @@ export default function CameraScreen() {
   });
   const [intervalSec, setIntervalSec] = useState(0);
   const [intervalPicker, setIntervalPicker] = useState(false);
-  const [permission, setPermission] = useState<'pending' | 'ok' | 'denied'>('pending');
-  const [micAllowed, setMicAllowed] = useState(true);
+  // İzin daha önce verildiyse "bekleniyor" ekranı hiç çıkmaz, kamera ilk karede kurulmaya başlar.
+  const [granted] = useState(permissionsGranted);
+  const [permission, setPermission] = useState<'pending' | 'ok' | 'denied'>(granted.camera ? 'ok' : 'pending');
+  const [micAllowed, setMicAllowed] = useState(granted.camera ? granted.microphone : true);
+  /** Açılış perdesi: ekran doğru yöne dönüp kamera görüntü verene kadar siyah, sonra yumuşakça kalkar.
+   * Dönüş ve yarım yerleşim görünmez (iPhone Kamera uygulaması gibi). */
+  const [cameraReady, setCameraReady] = useState(false);
+  const [curtain] = useState(() => new Animated.Value(1));
+  const [curtainUp, setCurtainUp] = useState(false);
   const [recording, setRecording] = useState(false);
   const [paused, setPaused] = useState(false);
   /** Geçen süre: duraklatmalara kadar biriken `total` ms, çalışıyorsa `since` başlangıcı (0 = duraklatıldı). */
@@ -252,6 +269,23 @@ export default function CameraScreen() {
   }, [permission]);
 
   // Çekim yokken ekran seçilen moda göre döner (yatayda sol/sağ ikisi de olur).
+  // Perde: kamera hazır ve ekran seçilen yönde olunca kalkar. Kamera bir sebeple haber vermezse
+  // (hata vb.) yine de kısa süre sonra kalkar ki ekran siyah kalmasın.
+  const orientationSettled = landscape === (mode === 'landscape');
+  useEffect(() => {
+    if (curtainUp) return;
+    const lift = () => {
+      setCurtainUp(true);
+      Animated.timing(curtain, { toValue: 0, duration: 160, useNativeDriver: true }).start();
+    };
+    if (cameraReady && orientationSettled) {
+      lift();
+      return;
+    }
+    const fallback = setTimeout(lift, 2000);
+    return () => clearTimeout(fallback);
+  }, [cameraReady, orientationSettled, curtainUp, curtain]);
+
   useEffect(() => {
     if (active) return;
     ScreenOrientation.lockAsync(
@@ -468,6 +502,7 @@ export default function CameraScreen() {
           setZoom(e.nativeEvent.zoom);
           setZoomAdjusting(e.nativeEvent.active);
         }}
+        onReady={() => setCameraReady(true)}
         onCameraError={(e) => setToast(errorText(s, e.nativeEvent.code, e.nativeEvent.detail))}
         onAutoStopped={(e) => {
           setRecording(false);
@@ -721,6 +756,7 @@ export default function CameraScreen() {
           )}
         </View>
       </View>
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.curtain, { opacity: curtain }]} />
     </View>
   );
 }
@@ -817,6 +853,7 @@ function Message({ text, children }: { text: string; children?: ReactNode }) {
 }
 
 const styles = StyleSheet.create({
+  curtain: { backgroundColor: '#000' },
   container: { flex: 1, backgroundColor: '#000' },
   screen: { backgroundColor: '#000' },
   lightScreen: { backgroundColor: '#fff' },

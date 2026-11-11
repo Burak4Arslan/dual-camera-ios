@@ -75,6 +75,14 @@ public class DualCameraModule: Module {
       AVCaptureMultiCamSession.isMultiCamSupported
     }
 
+    // Açılışta eşzamanlı: izin zaten verildiyse kamera ilk karede kurulur, bekleme ekranı çıkmaz.
+    Function("permissionsGranted") { () -> [String: Bool] in
+      [
+        "camera": AVCaptureDevice.authorizationStatus(for: .video) == .authorized,
+        "microphone": AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+      ]
+    }
+
     AsyncFunction("requestPermissions") { (promise: Promise) in
       AVCaptureDevice.requestAccess(for: .video) { camera in
         AVCaptureDevice.requestAccess(for: .audio) { microphone in
