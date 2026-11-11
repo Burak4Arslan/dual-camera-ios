@@ -10,7 +10,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.burakarslan.dualcam",
-      "buildNumber": "3",
+      "buildNumber": "4",
       "appleTeamId": "5BF7PPQH95",
       "infoPlist": {
         "NSCameraUsageDescription": "The front and back cameras are used to record videos and take photos.",
