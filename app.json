@@ -3,14 +3,14 @@
     "name": "Dual Camera",
     "slug": "DualCam",
     "scheme": "dualcam",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.burakarslan.dualcam",
-      "buildNumber": "2",
+      "buildNumber": "3",
       "appleTeamId": "5BF7PPQH95",
       "infoPlist": {
         "NSCameraUsageDescription": "The front and back cameras are used to record videos and take photos.",
