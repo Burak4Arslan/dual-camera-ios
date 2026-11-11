@@ -303,7 +303,7 @@ private struct CompositeLayout: Equatable {
 }
 
 /// Bir kameranın oturumdaki bağlantıları.
-private struct CameraLinks {
+struct CameraLinks {
   let device: AVCaptureDevice
   let input: AVCaptureDeviceInput
   let video: AVCaptureConnection // kayıt kareleri
@@ -855,12 +855,14 @@ final class DualCameraView: ExpoView,
   let onHardwareButton = EventDispatcher()
   let onOrientationChange = EventDispatcher()
 
-  private let session = AVCaptureMultiCamSession()
-  private let sessionQueue = DispatchQueue(label: "dualcam.session")
+  /// Donanım tarafı ortak ve açılışta hazırlanır (CameraRig.prewarm); aşağıdakiler ona bakar.
+  private let rig = CameraRig.shared
+  private var session: AVCaptureMultiCamSession { rig.session }
+  private var sessionQueue: DispatchQueue { rig.queue }
   private let dataQueue = DispatchQueue(label: "dualcam.data")
 
-  private let backPreview = AVCaptureVideoPreviewLayer()
-  private let frontPreview = AVCaptureVideoPreviewLayer()
+  private var backPreview: AVCaptureVideoPreviewLayer { rig.backPreview }
+  private var frontPreview: AVCaptureVideoPreviewLayer { rig.frontPreview }
   /// Tam kare (bölünmüş düzende bir yarı) ve küçük pencere (bölünmüşte diğer yarı). Hangi kameranın
   /// hangisinde olduğunu `swapped` belirler; önizleme katmanları kaplar arasında taşınır.
   private let mainContainer = UIView()
@@ -876,20 +878,32 @@ final class DualCameraView: ExpoView,
   /// Ön ışık açıkken önizleme küçülür (kenarlar beyaz kalır); 1 = tam boy. Kayda etkisi yok.
   private var previewScale: CGFloat = 1
 
-  private let backOutput = AVCaptureVideoDataOutput()
-  private let frontOutput = AVCaptureVideoDataOutput()
-  private let backPhotoOutput = AVCapturePhotoOutput()
-  private let frontPhotoOutput = AVCapturePhotoOutput()
-  private let audioOutput = AVCaptureAudioDataOutput()
+  private var backOutput: AVCaptureVideoDataOutput { rig.backOutput }
+  private var frontOutput: AVCaptureVideoDataOutput { rig.frontOutput }
+  private var backPhotoOutput: AVCapturePhotoOutput { rig.backPhotoOutput }
+  private var frontPhotoOutput: AVCapturePhotoOutput { rig.frontPhotoOutput }
+  private var audioOutput: AVCaptureAudioDataOutput { rig.audioOutput }
 
   // sessionQueue üzerinde kullanılır.
-  private var isConfigured = false
+  private var isConfigured: Bool {
+    get { rig.isConfigured }
+    set { rig.isConfigured = newValue }
+  }
   private var captureOrientation: AVCaptureVideoOrientation = .portrait
-  private var back: CameraLinks?
-  private var front: CameraLinks?
+  private var back: CameraLinks? {
+    get { rig.back }
+    set { rig.back = newValue }
+  }
+  private var front: CameraLinks? {
+    get { rig.front }
+    set { rig.front = newValue }
+  }
   private var audioConnection: AVCaptureConnection?
   private var activeMode: CameraMode = .both
-  private var activeKind: CaptureKind = .video
+  private var activeKind: CaptureKind {
+    get { rig.activeKind }
+    set { rig.activeKind = newValue }
+  }
   private var torchWanted = false
   /// Her kamera kendi yakınlaştırmasını hatırlar; düğmeler ve iki parmak büyük görüntüdekini değiştirir.
   private var backZoom: CGFloat = 1
@@ -952,6 +966,15 @@ final class DualCameraView: ExpoView,
 
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
+    // Foto/video değişince kare oranı değişir; yerleşim ona göre.
+    sessionQueue.async { [weak self, rig] in
+      rig.onFrameRatio = { ratio in
+        DispatchQueue.main.async {
+          self?.frameRatio = ratio
+          self?.setNeedsLayout()
+        }
+      }
+    }
     // Karenin dışı saydam: arkadaki ekran rengi görünür (normalde siyah, ön ışıkta beyaz).
     backgroundColor = .clear
     clipsToBounds = true
@@ -1278,13 +1301,14 @@ final class DualCameraView: ExpoView,
   func setCaptureMode(_ value: String) {
     guard !isRecording, let newKind = CaptureKind(rawValue: value), newKind != kind else { return }
     kind = newKind
+    UserDefaults.standard.set(newKind.rawValue, forKey: CameraRig.kindKey)
     sessionQueue.async { [weak self] in
       guard let self else { return }
       self.activeKind = newKind
       guard self.isConfigured else { return }
       self.session.beginConfiguration()
       do {
-        try self.applyFormats()
+        try self.rig.applyFormats()
       } catch {
         self.emitError(error)
       }
@@ -1540,31 +1564,18 @@ final class DualCameraView: ExpoView,
     session.beginConfiguration()
     defer { session.commitConfiguration() }
 
-    guard let frontCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
-    else { throw DualCameraError.noCamera }
-    front = try addCamera(
-      frontCamera, output: frontOutput, photoOutput: frontPhotoOutput, preview: frontPreview, mirrored: true)
-
-    // Arka kamera: önce lensler arasında kendiliğinden geçen sanal kameralar (0,5x ultra geniş,
-    // 3x tele), olmazsa tek geniş açı lens. Sanal kamera ön kamerayla birlikte 1080p'de donanıma
-    // sığmıyorsa bir sonrakine geçilir; tek lens gerekirse 720p'ye düşer.
-    var lastError: Error = DualCameraError.noCamera
-    for candidate in backCandidates(with: frontCamera) {
-      let fallback = candidate.deviceType == .builtInWideAngleCamera
-      do {
-        let links = try addCamera(
-          candidate, output: backOutput, photoOutput: backPhotoOutput, preview: backPreview, mirrored: false)
-        back = links
-        if try applyFormats(allowDowngrade: fallback) || fallback {
-          break
-        }
-        removeCamera(links)
-      } catch {
-        lastError = error
-      }
-      back = nil
+    // Kameralar çoğu zaman açılışta (CameraRig.prewarm) bağlanmış ve çalışıyor olur.
+    if !rig.camerasReady {
+      try rig.configureCameras()
     }
-    guard back != nil else { throw lastError }
+    for output in [backOutput, frontOutput] {
+      output.setSampleBufferDelegate(self, queue: dataQueue)
+    }
+    let ratio = rig.frameRatio
+    DispatchQueue.main.async { [weak self] in
+      self?.frameRatio = ratio
+      self?.setNeedsLayout()
+    }
 
     applyOrientation()
     // Mikrofon izni yoksa kamera yine açılır, video sessiz kaydedilir.
@@ -1572,127 +1583,6 @@ final class DualCameraView: ExpoView,
     applyCameraMode()
   }
 
-  /// Ön kamerayla birlikte çift kamera oturumunda kullanılabilen arka kameralar, tercih sırasıyla.
-  private func backCandidates(with front: AVCaptureDevice) -> [AVCaptureDevice] {
-    let types: [AVCaptureDevice.DeviceType] = [.builtInTripleCamera, .builtInDualWideCamera, .builtInWideAngleCamera]
-    let sets = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .unspecified)
-      .supportedMultiCamDeviceSets
-    return types
-      .compactMap { AVCaptureDevice.default($0, for: .video, position: .back) }
-      .filter { device in sets.contains { $0.contains(device) && $0.contains(front) } }
-  }
-
-  /// sessionQueue üzerinde, oturum yapılandırılırken çağrılır. Video: 16:9 1080p; foto: 4:3, en yüksek
-  /// foto çözünürlüğü. Donanım iki kamerayı kaldırmazsa ve `allowDowngrade` ise önce yüz, sonra sahne
-  /// kamerasını küçültür. Donanım sınırı aşılmıyorsa true döner.
-  @discardableResult
-  private func applyFormats(allowDowngrade: Bool = true) throws -> Bool {
-    guard let back, let front else { return false }
-    let photo = activeKind == .photo
-    try selectFormat(back.device, photo: photo, maxWidth: 1920)
-    try selectFormat(front.device, photo: photo, maxWidth: 1920)
-    if allowDowngrade && session.hardwareCost > 1.0 {
-      try selectFormat(front.device, photo: photo, maxWidth: 1280)
-    }
-    if allowDowngrade && session.hardwareCost > 1.0 {
-      try selectFormat(back.device, photo: photo, maxWidth: 1280)
-    }
-    // Foto, kameranın o anki formatının izin verdiği en büyük boyutta çekilsin.
-    for (links, output) in [(back, backPhotoOutput), (front, frontPhotoOutput)] {
-      if let dims = links.device.activeFormat.supportedMaxPhotoDimensions.max(by: { $0.width < $1.width }) {
-        output.maxPhotoDimensions = dims
-      }
-    }
-    let d = CMVideoFormatDescriptionGetDimensions(back.device.activeFormat.formatDescription)
-    let ratio = CGFloat(d.width) / CGFloat(d.height)
-    DispatchQueue.main.async { [weak self] in
-      self?.frameRatio = ratio
-      self?.setNeedsLayout()
-    }
-    return session.hardwareCost <= 1.0
-  }
-
-  /// Kamerayı oturuma bağlar; yarıda kalırsa eklediği girişi geri alır (bir sonraki aday denensin).
-  private func addCamera(
-    _ device: AVCaptureDevice, output: AVCaptureVideoDataOutput, photoOutput: AVCapturePhotoOutput,
-    preview: AVCaptureVideoPreviewLayer, mirrored: Bool
-  ) throws -> CameraLinks {
-    let input = try AVCaptureDeviceInput(device: device)
-    guard session.canAddInput(input) else { throw DualCameraError.noCamera }
-    session.addInputWithNoConnections(input)
-    var added: [AVCaptureConnection] = []
-
-    func connect(_ conn: AVCaptureConnection) throws {
-      guard session.canAddConnection(conn) else { throw DualCameraError.noCamera }
-      session.addConnection(conn)
-      added.append(conn)
-    }
-
-    do {
-      guard let port = input.ports(
-        for: .video, sourceDeviceType: device.deviceType, sourceDevicePosition: device.position
-      ).first else { throw DualCameraError.noCamera }
-
-      // Çıkışlar önceki denemeden kalmış olabilir.
-      output.alwaysDiscardsLateVideoFrames = true
-      output.setSampleBufferDelegate(self, queue: dataQueue)
-      for out in [output, photoOutput] as [AVCaptureOutput] where !session.outputs.contains(out) {
-        guard session.canAddOutput(out) else { throw DualCameraError.noCamera }
-        session.addOutputWithNoConnections(out)
-      }
-
-      let outConn = AVCaptureConnection(inputPorts: [port], output: output)
-      try connect(outConn)
-      let photoConn = AVCaptureConnection(inputPorts: [port], output: photoOutput)
-      try connect(photoConn)
-      // Foto her zaman en yüksek kalitede (oturum başlamadan ayarlanmalı).
-      photoOutput.maxPhotoQualityPrioritization = .quality
-      preview.setSessionWithNoConnection(session)
-      let previewConn = AVCaptureConnection(inputPort: port, videoPreviewLayer: preview)
-      try connect(previewConn)
-
-      // Yalnızca yüz önizlemesi ayna gibidir; kaydedilen yüz videosu ve fotosu düzdür.
-      for conn in [outConn, photoConn, previewConn] where conn.isVideoMirroringSupported {
-        conn.automaticallyAdjustsVideoMirroring = false
-        conn.isVideoMirrored = mirrored && conn === previewConn
-      }
-
-      return CameraLinks(device: device, input: input, video: outConn, photo: photoConn, preview: previewConn)
-    } catch {
-      added.forEach { session.removeConnection($0) }
-      session.removeInput(input)
-      throw error
-    }
-  }
-
-  private func removeCamera(_ links: CameraLinks) {
-    [links.video, links.photo, links.preview].forEach { session.removeConnection($0) }
-    session.removeInput(links.input)
-  }
-
-  /// Çoklu kamera destekli, 30 fps yapabilen, en fazla `maxWidth` genişlikte format.
-  /// Video: 16:9, en genişi. Foto: 4:3, en büyük foto çekebileni.
-  private func selectFormat(_ device: AVCaptureDevice, photo: Bool, maxWidth: Int32) throws {
-    let (w, h) = photo ? (4, 3) : (16, 9)
-    let candidates = device.formats.filter { f in
-      let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
-      return f.isMultiCamSupported
-        && d.width <= maxWidth
-        && Int(d.width) * h == Int(d.height) * w
-        && f.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= 30 }
-    }
-    func score(_ f: AVCaptureDevice.Format) -> (Int32, Int32) {
-      let photoWidth = f.supportedMaxPhotoDimensions.map(\.width).max() ?? 0
-      return (photo ? photoWidth : 0, CMVideoFormatDescriptionGetDimensions(f.formatDescription).width)
-    }
-    guard let best = candidates.max(by: { score($0) < score($1) }) else { return }
-
-    try device.lockForConfiguration()
-    device.activeFormat = best
-    device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
-    device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
-    device.unlockForConfiguration()
-  }
 
   private func addMicrophone() throws {
     guard let mic = AVCaptureDevice.default(for: .audio) else { return }

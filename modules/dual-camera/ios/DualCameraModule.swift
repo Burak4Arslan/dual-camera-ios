@@ -18,6 +18,8 @@ public class DualCameraModule: Module {
     // uygulama etkinleştikten sonra da yapabiliyor (ön ışık beyaz ama loş kalıyordu). İstenen düzey
     // dönüşte ve parlaklık her değiştiğinde (uygulama öndeyken) yeniden uygulanır.
     OnCreate {
+      // Kameraları hemen hazırlamaya başla; arayüz kodu yüklenirken kamera da açılsın.
+      CameraRig.shared.prewarm()
       let center = NotificationCenter.default
       for name in [UIApplication.didBecomeActiveNotification, UIScene.didActivateNotification] {
         observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
