@@ -15,6 +15,7 @@ import {
   View,
 } from 'react-native';
 import { EdgeInsets, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SFSymbol, SymbolView } from 'expo-symbols';
 
 import {
   CameraMode,
@@ -543,7 +544,7 @@ export default function CameraScreen() {
             accessibilityLabel={s.a11y.settings}
             onPress={() => router.push('/settings')}
           >
-            <Text style={styles.roundText}>⚙️</Text>
+            <Icon name="gearshape.fill" />
           </Pressable>
         )}
         {/* Işık yalnızca arka kamerada var; kayıt sırasında da açılıp kapanabilir. */}
@@ -556,7 +557,7 @@ export default function CameraScreen() {
             accessibilityState={{ checked: frontLight }}
             onPress={() => setFrontLight(!frontLight)}
           >
-            <Text style={styles.roundText}>💡</Text>
+            <Icon name={frontLight ? 'lightbulb.fill' : 'lightbulb.slash.fill'} on={frontLight} />
           </Pressable>
         )}
         {cameras !== 'front' && (
@@ -567,7 +568,7 @@ export default function CameraScreen() {
             accessibilityState={{ checked: torch }}
             onPress={() => setTorch(!torch)}
           >
-            <Text style={styles.roundText}>🔦</Text>
+            <Icon name={torch ? 'bolt.fill' : 'bolt.slash.fill'} on={torch} />
           </Pressable>
         )}
         <View style={[styles.pills, controlsLeft && styles.pillsRight]} pointerEvents="box-none">
@@ -579,8 +580,9 @@ export default function CameraScreen() {
           {/* Foto seçenekleri; yenileri de buraya eklenir. */}
           {capture === 'photo' && !active && (
             <Pressable style={[styles.pill, styles.option]} onPress={() => setIntervalPicker(!intervalPicker)}>
+              <PillIcon name="timer" />
               <Text style={styles.pillText}>
-                ⏱ {s.interval.label}: {intervalText(s, intervalSec)}
+                {s.interval.label}: {intervalText(s, intervalSec)}
               </Text>
             </Pressable>
           )}
@@ -604,20 +606,21 @@ export default function CameraScreen() {
           )}
           {capture === 'video' && !micAllowed && (
             <View style={[styles.pill, styles.micWarning]}>
-              <Text style={styles.pillText}>🎤 {s.mic.denied}</Text>
+              <PillIcon name="mic.slash.fill" />
+              <Text style={styles.pillText}>{s.mic.denied}</Text>
             </View>
           )}
           {capture === 'video' && micAllowed && mic && (
             <View style={[styles.pill, mic.external ? styles.micExternal : styles.option]}>
-              <Text style={styles.pillText}>🎤 {mic.external ? mic.name : s.mic.builtIn}</Text>
+              <PillIcon name="mic.fill" />
+              <Text style={styles.pillText}>{mic.external ? mic.name : s.mic.builtIn}</Text>
               <AudioMeter level={audioLevel} />
             </View>
           )}
           {active && (
             <View style={[styles.pill, styles.option]}>
-              <View style={[styles.dot, paused && styles.dotPaused]} />
+              {paused ? <PillIcon name="pause.fill" /> : <View style={styles.dot} />}
               <Text style={styles.pillText}>
-                {paused ? '⏸ ' : ''}
                 {formatTime(elapsed)}
                 {shooting ? ` · ${fill(s.saved.photoCount, { n: photos })}` : ''}
               </Text>
@@ -625,7 +628,8 @@ export default function CameraScreen() {
           )}
           {storage && (
             <View style={[styles.pill, storage.low ? styles.micWarning : styles.option]}>
-              <Text style={styles.pillText}>💾 {storage.text}</Text>
+              <PillIcon name="sdcard.fill" />
+              <Text style={styles.pillText}>{storage.text}</Text>
             </View>
           )}
         </View>
@@ -708,7 +712,7 @@ export default function CameraScreen() {
               accessibilityLabel={paused ? s.a11y.resume : s.a11y.pause}
               onPress={togglePause}
             >
-              <Text style={styles.roundText}>{paused ? '▶️' : '⏸️'}</Text>
+              <Icon name={paused ? 'play.fill' : 'pause.fill'} />
             </Pressable>
           )}
         </View>
@@ -764,7 +768,7 @@ export default function CameraScreen() {
               accessibilityLabel={s.a11y.flip}
               onPress={() => setCameras(cameras === 'back' ? 'front' : 'back')}
             >
-              <Text style={styles.roundText}>🔄</Text>
+              <Icon name="arrow.triangle.2.circlepath.camera" />
             </Pressable>
           )}
         </View>
@@ -819,16 +823,26 @@ function LookHere({
   }, [pulse]);
 
   const half = 11;
-  const [arrow, left, top] = !landscape
-    ? ['▲', mini.x + mini.width / 2 - half, mini.y - half]
+  const [arrow, left, top]: [SFSymbol, number, number] = !landscape
+    ? ['arrowtriangle.up.fill', mini.x + mini.width / 2 - half, mini.y - half]
     : lensLeft
-      ? ['◀', mini.x - half, mini.y + mini.height / 2 - half]
-      : ['▶', mini.x + mini.width - half, mini.y + mini.height / 2 - half];
+      ? ['arrowtriangle.left.fill', mini.x - half, mini.y + mini.height / 2 - half]
+      : ['arrowtriangle.right.fill', mini.x + mini.width - half, mini.y + mini.height / 2 - half];
   return (
     <Animated.View style={[styles.lookHere, { left, top, opacity: pulse }]} pointerEvents="none">
-      <Text style={styles.lookHereText}>{arrow}</Text>
+      <SymbolView name={arrow} size={10} tintColor="#000" />
     </Animated.View>
   );
+}
+
+/** Yuvarlak tuşların simgesi (SF Symbols, Kamera uygulamasındaki gibi). `on`: sarı zeminde siyah. */
+function Icon({ name, on = false }: { name: SFSymbol; on?: boolean }) {
+  return <SymbolView name={name} size={20} weight="medium" tintColor={on ? '#000' : '#fff'} />;
+}
+
+/** Bilgi hapının başındaki küçük simge. */
+function PillIcon({ name }: { name: SFSymbol }) {
+  return <SymbolView name={name} size={14} weight="semibold" tintColor="#fff" style={styles.pillIcon} />;
 }
 
 /** Üçte bir kuralı çizgileri; kaydedilen karenin üstüne. */
@@ -884,13 +898,12 @@ const styles = StyleSheet.create({
   topRight: { flexDirection: 'row-reverse' },
   pillsRight: { alignItems: 'flex-end' },
   roundButton: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#000a', alignItems: 'center', justifyContent: 'center' },
-  roundText: { fontSize: 18 },
   torchOn: { backgroundColor: '#facc15' },
   flipButton: { position: 'absolute', bottom: 76, left: 12 },
   lookHere: { position: 'absolute', width: 22, height: 22, borderRadius: 11, backgroundColor: '#facc15', alignItems: 'center', justifyContent: 'center' },
-  lookHereText: { color: '#000', fontSize: 11, fontWeight: '800' },
   pill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16 },
   pillText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  pillIcon: { width: 14, height: 14, marginRight: 6 },
   option: { backgroundColor: '#000a' },
   micExternal: { backgroundColor: '#1f9d55cc' },
   micWarning: { backgroundColor: '#d97706cc' },
@@ -902,7 +915,6 @@ const styles = StyleSheet.create({
   chipOn: { backgroundColor: '#facc15' },
   chipTextOn: { color: '#000' },
   dot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#ef4444', marginRight: 8 },
-  dotPaused: { backgroundColor: '#9ca3af' },
   toastWrap: { position: 'absolute', left: 0, right: 0, paddingHorizontal: 24, alignItems: 'center' },
   toast: { color: '#fff', backgroundColor: '#000b', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, overflow: 'hidden', textAlign: 'center' },
   captureWrap: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },

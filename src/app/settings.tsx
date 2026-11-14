@@ -1,4 +1,5 @@
 import { router, Stack } from 'expo-router';
+import { SymbolView } from 'expo-symbols';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { AppState, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
@@ -65,7 +66,7 @@ export default function SettingsScreen() {
             <Text style={styles.rowText}>
               {language === 'system' ? s.settings.systemLanguage : LANGUAGE_NAMES[language]}
             </Text>
-            {settings.language === language && <Text style={styles.check}>✓</Text>}
+            {settings.language === language && <SymbolView name="checkmark" size={17} weight="semibold" tintColor="#0a84ff" />}
           </Pressable>
         ))}
       </View>
@@ -138,7 +139,7 @@ export default function SettingsScreen() {
               <Text style={styles.rowText}>{s.settings[LAYOUT_TEXT[layout][0]]}</Text>
               <Text style={styles.hint}>{s.settings[LAYOUT_TEXT[layout][1]]}</Text>
             </View>
-            {settings.layout === layout && <Text style={styles.check}>✓</Text>}
+            {settings.layout === layout && <SymbolView name="checkmark" size={17} weight="semibold" tintColor="#0a84ff" />}
           </Pressable>
         ))}
         <View style={[styles.row, styles.rowBorder]}>
@@ -192,7 +193,7 @@ export default function SettingsScreen() {
             <Text style={styles.rowText}>{s.settings.contact}</Text>
             <Text style={styles.hint}>{CONTACT.email}</Text>
           </View>
-          <Text style={styles.chevron}>›</Text>
+          <SymbolView name="chevron.right" size={14} weight="semibold" tintColor="#636366" />
         </Pressable>
         <Pressable
           style={[styles.row, styles.rowBorder]}
@@ -200,7 +201,7 @@ export default function SettingsScreen() {
           onPress={() => router.push('/privacy')}
         >
           <Text style={styles.rowText}>{s.settings.privacy}</Text>
-          <Text style={styles.chevron}>›</Text>
+          <SymbolView name="chevron.right" size={14} weight="semibold" tintColor="#636366" />
         </Pressable>
       </View>
       <Text style={styles.footer}>© 2026 {CONTACT.developer}</Text>
@@ -221,7 +222,5 @@ const styles = StyleSheet.create({
   hint: { color: '#8e8e93', fontSize: 13 },
   warning: { color: '#ff9f0a' },
   value: { color: '#8e8e93', fontSize: 16 },
-  check: { color: '#0a84ff', fontSize: 17, fontWeight: '600' },
-  chevron: { color: '#636366', fontSize: 22 },
   footer: { color: '#636366', fontSize: 12, textAlign: 'center', marginTop: 24 },
 });
