@@ -311,10 +311,9 @@ export default function CameraScreen() {
 
   /** Foto çekildiğini belli et: iPhone kamerası gibi görüntü bir an kararıp açılır. */
   const blink = useCallback(() => {
-    if (!settings.shutterEffect) return;
     shutterBlink.setValue(1);
     Animated.timing(shutterBlink, { toValue: 0, duration: 250, useNativeDriver: true }).start();
-  }, [settings.shutterEffect, shutterBlink]);
+  }, [shutterBlink]);
 
   /** Native söz (promise) hatası: `code` çeviri anahtarı, `message` sistem ayrıntısı. */
   const failText = useCallback((e: any) => errorText(s, e?.code, e?.message), [s]);

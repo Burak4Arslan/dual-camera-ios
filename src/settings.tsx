@@ -8,7 +8,6 @@ export type Settings = {
   /** `system`: telefonun dili (desteklenmiyorsa İngilizce). */
   language: 'system' | Language;
   grid: boolean;
-  shutterEffect: boolean;
   /** Ön+Arka videoyu tek dosya yap (yüz sahnenin köşesinde); kapalıyken iki ayrı video. */
   combineVideo: boolean;
   /** Kayıt ya da aralıklı çekimde 30 sn dokunulmazsa parlaklığı düşür. */
@@ -31,7 +30,6 @@ export type Settings = {
 const DEFAULTS: Settings = {
   language: 'system',
   grid: false,
-  shutterEffect: true,
   combineVideo: false,
   dimScreen: true,
   pipPosition: null,
