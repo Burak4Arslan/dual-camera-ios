@@ -3,6 +3,7 @@ import AVKit
 import Accelerate
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import CoreLocation
 import ExpoModulesCore
 import Photos
 import UIKit
@@ -126,6 +127,8 @@ private final class Track {
     // Video her 2 sn'de bir diske kesinleşir: uygulama çökse ya da yazıcı hata verse bile o ana
     // kadarki kısım oynatılabilir kalır (bir sonraki açılışta galeriye kurtarılır).
     writer.movieFragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
+    // Çekim tarihi, cihaz ve (izin varsa) konum: Fotoğraflar'daki tarih ve harita bunlardan.
+    writer.metadata = CaptureMetadata.videoItems(date: Date(), location: LocationTracker.shared.current)
     let width = CVPixelBufferGetWidth(image)
     let height = CVPixelBufferGetHeight(image)
 
@@ -314,6 +317,8 @@ struct CameraLinks {
 /// Bir deklanşör basışı: seçili her kameradan bir foto. Sıra `outputs` sırasıdır (önce sahne, sonra yüz).
 private final class PhotoShot: NSObject, AVCapturePhotoCaptureDelegate {
   private let outputs: [AVCapturePhotoOutput]
+  /// Deklanşöre basıldığı andaki konum; fotonun EXIF'ine GPS olarak yazılır.
+  private let location: LocationStamp?
   private let queue: DispatchQueue
   private let completion: (PhotoShot, [Data], Error?) -> Void
 
@@ -323,10 +328,11 @@ private final class PhotoShot: NSObject, AVCapturePhotoCaptureDelegate {
   private var firstError: Error?
 
   init(
-    outputs: [AVCapturePhotoOutput], queue: DispatchQueue,
+    outputs: [AVCapturePhotoOutput], queue: DispatchQueue, location: CLLocation?,
     completion: @escaping (PhotoShot, [Data], Error?) -> Void
   ) {
     self.outputs = outputs
+    self.location = location.map(LocationStamp.init)
     self.queue = queue
     self.completion = completion
     photos = Array(repeating: nil, count: outputs.count)
@@ -337,7 +343,9 @@ private final class PhotoShot: NSObject, AVCapturePhotoCaptureDelegate {
   func photoOutput(
     _ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?
   ) {
-    let data = error == nil ? photo.fileDataRepresentation() : nil
+    let data = error == nil
+      ? location.map { photo.fileDataRepresentation(with: $0) } ?? photo.fileDataRepresentation()
+      : nil
     queue.async { [self] in
       if let data, let i = outputs.firstIndex(where: { $0 === output }) {
         photos[i] = data
@@ -359,6 +367,21 @@ private final class PhotoShot: NSObject, AVCapturePhotoCaptureDelegate {
         completion(self, photos.compactMap { $0 }, firstError)
       }
     }
+  }
+}
+
+/// Fotoğrafın kendi bilgilerine (tarih, cihaz, lens, pozlama) konumu ekler.
+private final class LocationStamp: NSObject, AVCapturePhotoFileDataRepresentationCustomizer {
+  private let gps: [String: Any]
+
+  init(_ location: CLLocation) {
+    gps = CaptureMetadata.gps(location)
+  }
+
+  func replacementMetadata(for photo: AVCapturePhoto) -> [String: Any]? {
+    var metadata = photo.metadata
+    metadata[kCGImagePropertyGPSDictionary as String] = gps
+    return metadata
   }
 }
 
@@ -489,7 +512,10 @@ private enum PhotoCombiner {
       guard let personMask = personMask(in: faceImage) else { return nil }
       mask = personMask
     }
-    let image = PipCompositor().compose(scene: sceneImage, face: faceImage, mask: mask, layout: layout)
+    // Birleştirilen görüntüde bilgi kalmaz; sahne fotosunun tarihi, cihazı ve konumu taşınır.
+    let composed = PipCompositor().compose(scene: sceneImage, face: faceImage, mask: mask, layout: layout)
+    let image = composed.settingProperties(
+      CaptureMetadata.combinedProperties(from: sceneImage.properties, size: composed.extent.size))
     let space = sceneImage.colorSpace ?? CGColorSpace(name: CGColorSpace.displayP3)!
     let quality = [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9]
     return context.heifRepresentation(of: image, format: .RGBA8, colorSpace: space, options: quality)
@@ -1791,7 +1817,7 @@ final class DualCameraView: ExpoView,
         return
       }
       let combined = outputs.count == 2 ? combined : nil
-      let shot = PhotoShot(outputs: outputs, queue: self.sessionQueue) { [weak self] shot, photos, error in
+      let shot = PhotoShot(outputs: outputs, queue: self.sessionQueue, location: LocationTracker.shared.current) { [weak self] shot, photos, error in
         self?.shots.remove(shot)
         guard !photos.isEmpty else {
           DispatchQueue.main.async { completion(.failure(error ?? DualCameraError.photoFailed)) }

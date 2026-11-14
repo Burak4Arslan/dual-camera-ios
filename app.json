@@ -16,6 +16,7 @@
         "NSCameraUsageDescription": "The front and back cameras are used to record videos and take photos.",
         "NSMicrophoneUsageDescription": "The microphone records sound with your videos. Without access, videos are saved without sound.",
         "NSPhotoLibraryAddUsageDescription": "Used to save the videos and photos you take to your library.",
+        "NSLocationWhenInUseUsageDescription": "Adds where you shot to your videos and photos, as in the Camera app. The location stays on your device.",
         "UIRequiresFullScreen": true,
         "CFBundleAllowMixedLocalizations": true
       },

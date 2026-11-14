@@ -24,6 +24,8 @@ export type Settings = {
   /** Kaydedilen sesteki sürekli hışırtıyı temizle. Varsayılan kapalı: ham ses, sonradan
    * CapCut gibi bir programla (ör. Isolate voice) çok daha iyi temizleniyor. */
   noiseReduction: boolean;
+  /** Çekimlere konum yaz (Kamera uygulaması gibi). İzin ilk açılışta sorulur. */
+  saveLocation: boolean;
 };
 
 const DEFAULTS: Settings = {
@@ -37,6 +39,7 @@ const DEFAULTS: Settings = {
   volumeButtons: true,
   eyeContact: true,
   noiseReduction: false,
+  saveLocation: true,
 };
 const KEY = 'settings';
 

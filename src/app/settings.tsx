@@ -1,9 +1,10 @@
 import { router, Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { AppState, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { appVersion } from '../../modules/dual-camera';
+import { appVersion, locationPermission, requestLocationPermission } from '../../modules/dual-camera';
 import { CONTACT, contactMailUrl } from '../contact';
 import { useStrings } from '../i18n';
 import { LANGUAGE_NAMES, LANGUAGES } from '../i18n/strings';
@@ -24,6 +25,15 @@ export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const { version, build } = appVersion();
   const versionText = build ? `${version} (${build})` : version;
+  // İzin iOS Ayarları'ndan değiştirilip dönülünce de güncellensin.
+  const [location, setLocation] = useState(locationPermission);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') setLocation(locationPermission());
+    });
+    return () => sub.remove();
+  }, []);
+  const locationDenied = settings.saveLocation && location === 'denied';
   // Yatayda çentik tarafında içerik kesilmesin.
   const side = { paddingLeft: Math.max(insets.left, 16), paddingRight: Math.max(insets.right, 16) };
 
@@ -92,6 +102,26 @@ export default function SettingsScreen() {
             <Text style={styles.hint}>{s.settings.eyeContactHint}</Text>
           </View>
           <Switch value={settings.eyeContact} onValueChange={(eyeContact) => settings.update({ eyeContact })} />
+        </View>
+        <View style={[styles.row, styles.rowBorder]}>
+          <Pressable
+            style={styles.rowLabel}
+            disabled={!locationDenied}
+            accessibilityRole={locationDenied ? 'link' : undefined}
+            onPress={() => Linking.openSettings()}
+          >
+            <Text style={styles.rowText}>{s.settings.saveLocation}</Text>
+            <Text style={[styles.hint, locationDenied && styles.warning]}>
+              {locationDenied ? s.settings.saveLocationDenied : s.settings.saveLocationHint}
+            </Text>
+          </Pressable>
+          <Switch
+            value={settings.saveLocation}
+            onValueChange={(saveLocation) => {
+              settings.update({ saveLocation });
+              if (saveLocation && location === 'undetermined') requestLocationPermission();
+            }}
+          />
         </View>
       </View>
 
@@ -189,6 +219,7 @@ const styles = StyleSheet.create({
   rowLabel: { flexShrink: 1, gap: 2 },
   rowText: { color: '#fff', fontSize: 16 },
   hint: { color: '#8e8e93', fontSize: 13 },
+  warning: { color: '#ff9f0a' },
   value: { color: '#8e8e93', fontSize: 16 },
   check: { color: '#0a84ff', fontSize: 17, fontWeight: '600' },
   chevron: { color: '#636366', fontSize: 22 },

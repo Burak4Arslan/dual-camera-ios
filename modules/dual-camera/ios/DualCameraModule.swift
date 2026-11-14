@@ -93,6 +93,15 @@ public class DualCameraModule: Module {
       }
     }
 
+    // Konum izni kamera ve mikrofondan sonra sorulur (daha önce sorulduysa bir şey olmaz).
+    Function("requestLocationPermission") {
+      LocationTracker.shared.requestPermission()
+    }
+
+    Function("locationPermission") { () -> String in
+      LocationTracker.permission()
+    }
+
     // Arayüzün gerçek yönü (pencere sahnesinden). expo-screen-orientation'ın getOrientationAsync'i
     // yönü cihazın fiziksel duruşundan tahmin ediyor; yatayda sol/sağı karıştırabiliyor.
     AsyncFunction("getInterfaceOrientation") { () -> String in
@@ -151,6 +160,10 @@ public class DualCameraModule: Module {
 
       Prop("noiseReduction") { (view: DualCameraView, value: Bool) in
         view.setNoiseReduction(value)
+      }
+
+      Prop("saveLocation") { (_: DualCameraView, value: Bool) in
+        LocationTracker.shared.setEnabled(value)
       }
 
       Prop("pipPosition") { (view: DualCameraView, value: PipPosition?) in

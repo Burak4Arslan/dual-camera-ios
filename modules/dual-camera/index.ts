@@ -51,6 +51,8 @@ export type DualCameraViewProps = ViewProps & {
   onHardwareButton?: (e: NativeSyntheticEvent<{ button: 'primary' | 'secondary' }>) => void;
   /** Kaydedilen sesteki sürekli hışırtıyı temizle (spektral gürültü azaltma). Sonraki kayıtta geçerli. */
   noiseReduction?: boolean;
+  /** Çekimlere konum yaz (izin verildiyse). Uygulama öndeyken konum takip edilir. */
+  saveLocation?: boolean;
   /** Önizlemenin boyutu (1 = tam). Ön ışıkta küçülür, etrafı beyaz kalır; kayda etkisi yok. */
   previewScale?: number;
   /** Göz teması penceresinin ekrandaki yeri (pt); verilmezse gizli. Yalnızca ekranda, kaydedilmez. */
@@ -95,7 +97,11 @@ const DualCameraModule = requireNativeModule<{
   getFreeSpace(): Promise<number>;
   recoverRecordings(): Promise<number>;
   appVersion(): { version: string; build: string };
+  requestLocationPermission(): void;
+  locationPermission(): LocationPermission;
 }>('DualCamera');
+
+export type LocationPermission = 'granted' | 'denied' | 'undetermined';
 
 export const isSupported = () => DualCameraModule.isSupported();
 export const requestPermissions = () => DualCameraModule.requestPermissions();
@@ -112,6 +118,9 @@ export const getFreeSpace = () => DualCameraModule.getFreeSpace();
  * kaydeder; kaç dosya kurtarıldığını döner.
  */
 export const recoverRecordings = () => DualCameraModule.recoverRecordings();
+/** Konum izni daha önce sorulmadıysa sorar (kamera ve mikrofondan sonra). */
+export const requestLocationPermission = () => DualCameraModule.requestLocationPermission();
+export const locationPermission = () => DualCameraModule.locationPermission();
 /** App Store'daki sürüm (ör. 1.0.0) ve build numarası. */
 export const appVersion = () => DualCameraModule.appVersion();
 

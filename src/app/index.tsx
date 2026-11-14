@@ -26,6 +26,7 @@ import {
   isSupported,
   permissionsGranted,
   recoverRecordings,
+  requestLocationPermission,
   requestPermissions,
   setScreenBrightness,
 } from '../../modules/dual-camera';
@@ -254,7 +255,11 @@ export default function CameraScreen() {
     requestPermissions().then(({ camera, microphone }) => {
       setPermission(camera ? 'ok' : 'denied');
       setMicAllowed(microphone);
+      // Konum en son sorulur (Kamera uygulaması gibi); ayardan kapatılabilir.
+      if (camera && settings.saveLocation) requestLocationPermission();
     });
+    // Yalnızca açılışta bir kez.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Uygulama kayıt sırasında çöktüyse ya da galeriye aktarma olmadıysa kayıt kaybolmaz: dosyası
@@ -482,6 +487,7 @@ export default function CameraScreen() {
         zoom={zoom}
         combine={combineVideo}
         noiseReduction={settings.noiseReduction}
+        saveLocation={settings.saveLocation}
         previewScale={frontLight ? LIGHT_PREVIEW_SCALE : 1}
         pipPosition={settings.pipPosition ?? undefined}
         layout={settings.layout}

@@ -3,6 +3,7 @@
     "CFBundleDisplayName": "Çift Kamera",
     "NSCameraUsageDescription": "Ön ve arka kamerayla video ve foto çekmek için kamera gerekiyor.",
     "NSMicrophoneUsageDescription": "Videolara ses kaydetmek için mikrofon gerekiyor. İzin vermezsen videolar sessiz kaydedilir.",
-    "NSPhotoLibraryAddUsageDescription": "Çektiğin video ve fotoları galeriye kaydetmek için."
+    "NSPhotoLibraryAddUsageDescription": "Çektiğin video ve fotoları galeriye kaydetmek için.",
+    "NSLocationWhenInUseUsageDescription": "Kamera uygulamasındaki gibi çektiğin yer video ve fotoğraflarına eklenir. Konum telefonundan çıkmaz."
   }
 }
