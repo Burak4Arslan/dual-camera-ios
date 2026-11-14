@@ -7,13 +7,12 @@ function isLanguage(code: string | null): code is Language {
   return LANGUAGES.includes(code as Language);
 }
 
-/** Ayarlardaki dil; "telefonun dili" seçiliyse telefonun tercih ettiği ilk desteklenen dil. */
+/** Ayarlarda seçilen dil; seçilmediyse telefonun tercih ettiği ilk desteklenen dil, o da yoksa İngilizce. */
 export function useLanguage(): Language {
   const { language } = useSettings();
   const locales = useLocales();
-  if (language !== 'system') return language;
-  const device = locales.map((l) => l.languageCode).find(isLanguage);
-  return device ?? 'en';
+  if (language) return language;
+  return locales.map((l) => l.languageCode).find(isLanguage) ?? 'en';
 }
 
 export function useStrings(): Strings {

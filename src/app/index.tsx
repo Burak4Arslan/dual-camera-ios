@@ -32,7 +32,7 @@ import {
   setScreenBrightness,
 } from '../../modules/dual-camera';
 import { errorText, fill, useLanguage, useStrings } from '../i18n';
-import type { Language, Strings } from '../i18n/strings';
+import { Language, LANGUAGE_LOCALES, Strings } from '../i18n/strings';
 import { photosLeft, useFreeSpace, videoSecondsLeft } from '../hooks/useFreeSpace';
 import { readRemembered, useRemembered } from '../hooks/useRemembered';
 import { useScreenDimmer } from '../hooks/useScreenDimmer';
@@ -63,10 +63,9 @@ const ZOOM_PRESETS = [0.5, 1, 2, 5, 10];
 /** Yakınlaştırma düğmelerinin üstünde parmak bu kadar (pt) sağa kayınca yakınlaştırma iki katına çıkar. */
 const ZOOM_SCRUB_DOUBLING = 70;
 
-/** "1.7×", Türkçede "1,7×". */
+/** "1.7×"; ondalık virgül kullanan dillerde "1,7×". */
 function zoomLabel(zoom: number, language: Language) {
-  const text = String(Math.round(zoom * 10) / 10);
-  return `${language === 'tr' ? text.replace('.', ',') : text}×`;
+  return `${(Math.round(zoom * 10) / 10).toLocaleString(LANGUAGE_LOCALES[language])}×`;
 }
 
 function formatTime(sec: number) {
@@ -397,7 +396,7 @@ export default function CameraScreen() {
   /** Kalan kayıt süresi / foto sayısı (depolamaya göre); az kaldıysa uyarı rengi. */
   function storageInfo() {
     if (freeSpace === null) return null;
-    const locale = language === 'tr' ? 'tr-TR' : 'en-US';
+    const locale = LANGUAGE_LOCALES[language];
     if (capture === 'photo') {
       const n = photosLeft(freeSpace, cameras === 'both' ? 2 : 1);
       return { text: fill(s.storage.photos, { n: n.toLocaleString(locale) }), low: n < 50 };

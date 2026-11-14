@@ -4,6 +4,12 @@ export type Language = (typeof LANGUAGES)[number];
 /** Dil seçiminde her dil kendi adıyla görünür. */
 export const LANGUAGE_NAMES: Record<Language, string> = { tr: 'Türkçe', en: 'English' };
 
+/** Dil seçicideki bayraklar (dilin çıktığı ülke). */
+export const LANGUAGE_FLAGS: Record<Language, string> = { tr: '🇹🇷', en: '🇬🇧' };
+
+/** Sayı biçimi (ondalık ve binlik ayırıcı) için. */
+export const LANGUAGE_LOCALES: Record<Language, string> = { tr: 'tr-TR', en: 'en-US' };
+
 // `{n}`, `{time}` gibi yerler `fill` ile doldurulur.
 const tr = {
   /** Ana ekranda ikonun altında görünen ad (locales/*.json CFBundleDisplayName ile aynı). */
@@ -60,9 +66,6 @@ const tr = {
     title: 'Ayarlar',
     done: 'Bitti',
     language: 'Dil',
-    systemLanguage: 'Telefonun dili',
-    /** Dil seçicide kısa ad (tam adı erişilebilirlik için `systemLanguage`). */
-    systemLanguageShort: 'Otomatik',
     camera: 'Kamera',
     grid: 'Izgara çizgileri',
     video: 'Video',
@@ -176,8 +179,6 @@ const en: Strings = {
     title: 'Settings',
     done: 'Done',
     language: 'Language',
-    systemLanguage: 'Device language',
-    systemLanguageShort: 'Automatic',
     camera: 'Camera',
     grid: 'Grid lines',
     video: 'Video',

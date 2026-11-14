@@ -2,11 +2,11 @@ import Storage from 'expo-sqlite/kv-store';
 import { createContext, ReactNode, useContext, useState } from 'react';
 
 import type { DualLayout, PipPosition } from '../modules/dual-camera';
-import type { Language } from './i18n/strings';
+import { Language, LANGUAGES } from './i18n/strings';
 
 export type Settings = {
-  /** `system`: telefonun dili (desteklenmiyorsa İngilizce). */
-  language: 'system' | Language;
+  /** Seçilen dil; null: henüz seçilmedi, telefonun dili (desteklenmiyorsa İngilizce). */
+  language: Language | null;
   grid: boolean;
   /** Ön+Arka videoyu tek dosya yap (yüz sahnenin köşesinde); kapalıyken iki ayrı video. */
   combineVideo: boolean;
@@ -28,7 +28,7 @@ export type Settings = {
 };
 
 const DEFAULTS: Settings = {
-  language: 'system',
+  language: null,
   grid: false,
   combineVideo: false,
   dimScreen: true,
@@ -45,7 +45,11 @@ const KEY = 'settings';
 function load(): Settings {
   try {
     const saved = Storage.getItemSync(KEY);
-    return saved ? { ...DEFAULTS, ...JSON.parse(saved) } : DEFAULTS;
+    if (!saved) return DEFAULTS;
+    const settings: Settings = { ...DEFAULTS, ...JSON.parse(saved) };
+    // Eski "Otomatik" ("system") seçeneği kalktı; seçilmemiş sayılır, telefonun dili kullanılır.
+    if (settings.language && !LANGUAGES.includes(settings.language)) settings.language = null;
+    return settings;
   } catch {
     return DEFAULTS;
   }

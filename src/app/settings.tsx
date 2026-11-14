@@ -7,11 +7,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { appVersion, locationPermission, requestLocationPermission } from '../../modules/dual-camera';
 import { CONTACT, contactMailUrl } from '../contact';
-import { useStrings } from '../i18n';
-import { LANGUAGE_NAMES, LANGUAGES } from '../i18n/strings';
+import { useLanguage, useStrings } from '../i18n';
+import { Language, LANGUAGE_FLAGS, LANGUAGE_NAMES, LANGUAGES } from '../i18n/strings';
 import { Settings, useSettings } from '../settings';
 
-const LANGUAGE_OPTIONS: Settings['language'][] = ['system', ...LANGUAGES];
 const LAYOUT_OPTIONS: Settings['layout'][] = ['pip', 'split', 'cutout'];
 
 const LAYOUT_TEXT = {
@@ -28,14 +27,13 @@ const C = {
   label: '#fff',
   secondary: '#8e8e93',
   tertiary: '#636366',
-  fill: '#76768033',
-  selectedFill: '#636366',
   blue: '#0a84ff',
   orange: '#ff9f0a',
 };
 
 export default function SettingsScreen() {
   const s = useStrings();
+  const language = useLanguage();
   const settings = useSettings();
   const insets = useSafeAreaInsets();
   const { version, build } = appVersion();
@@ -77,16 +75,16 @@ export default function SettingsScreen() {
       />
       <View style={styles.column}>
         <Section title={s.settings.language}>
-          <View style={styles.segmentRow}>
-            <Segmented
-              options={LANGUAGE_OPTIONS.map((language) => ({
-                value: language,
-                label: language === 'system' ? s.settings.systemLanguageShort : LANGUAGE_NAMES[language],
-                accessibilityLabel: language === 'system' ? s.settings.systemLanguage : undefined,
-              }))}
-              value={settings.language}
-              onChange={(language) => settings.update({ language })}
-            />
+          {/* Seçilmediyse telefonun dili seçili görünür. */}
+          <View style={styles.cards}>
+            {LANGUAGES.map((option) => (
+              <LanguageCard
+                key={option}
+                language={option}
+                selected={language === option}
+                onPress={() => settings.update({ language: option })}
+              />
+            ))}
           </View>
         </Section>
 
@@ -261,36 +259,28 @@ function Chevron() {
   return <SymbolView name="chevron.right" size={14} weight="semibold" tintColor={C.tertiary} style={styles.chevron} />;
 }
 
-/** iOS segmentli seçici görünümü. */
-function Segmented<T extends string>({
-  options,
-  value,
-  onChange,
-}: {
-  options: { value: T; label: string; accessibilityLabel?: string }[];
-  value: T;
-  onChange: (value: T) => void;
-}) {
+/** Dil: bayrak ve dilin kendi adı (Ön+Arka kartlarıyla aynı seçim görünümü). */
+function LanguageCard({ language, selected, onPress }: { language: Language; selected: boolean; onPress: () => void }) {
   return (
-    <View style={styles.segmented} accessibilityRole="tablist">
-      {options.map((option) => {
-        const selected = option.value === value;
-        return (
-          <Pressable
-            key={option.value}
-            style={[styles.segment, selected && styles.segmentSelected]}
-            onPress={() => onChange(option.value)}
-            accessibilityRole="tab"
-            accessibilityState={{ selected }}
-            accessibilityLabel={option.accessibilityLabel}
-          >
-            <Text style={[styles.segmentText, selected && styles.segmentTextSelected]} numberOfLines={1}>
-              {option.label}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
+    <Pressable
+      style={styles.languageCard}
+      onPress={onPress}
+      accessibilityRole="radio"
+      accessibilityState={{ selected }}
+      accessibilityLabel={LANGUAGE_NAMES[language]}
+    >
+      <View style={[styles.flagTile, selected && styles.diagramSelected]}>
+        <Text style={styles.flag}>{LANGUAGE_FLAGS[language]}</Text>
+        {selected && (
+          <View style={styles.badge}>
+            <SymbolView name="checkmark.circle.fill" size={18} tintColor={C.blue} />
+          </View>
+        )}
+      </View>
+      <Text style={[styles.layoutLabel, selected && styles.layoutLabelSelected]} numberOfLines={1}>
+        {LANGUAGE_NAMES[language]}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -371,12 +361,19 @@ const styles = StyleSheet.create({
   warning: { color: C.orange },
   chevron: { width: 14, height: 14, marginTop: 10 },
 
-  segmentRow: { padding: 12 },
-  segmented: { flexDirection: 'row', backgroundColor: C.fill, borderRadius: 9, padding: 2 },
-  segment: { flex: 1, height: 30, borderRadius: 7, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
-  segmentSelected: { backgroundColor: C.selectedFill },
-  segmentText: { color: C.label, fontSize: 14, fontWeight: '500' },
-  segmentTextSelected: { fontWeight: '600' },
+  cards: { flexDirection: 'row', justifyContent: 'center', gap: 10, paddingHorizontal: 12, paddingTop: 14, paddingBottom: 12 },
+  languageCard: { flex: 1, maxWidth: 120, alignItems: 'center', gap: 8 },
+  flagTile: {
+    width: '100%',
+    height: 58,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    backgroundColor: '#2c2c2e',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  flag: { fontSize: 34, lineHeight: 40 },
 
   layouts: { flexDirection: 'row', justifyContent: 'center', gap: 10, paddingHorizontal: 12, paddingTop: 14 },
   // Yatayda kartlar çok büyümesin.
