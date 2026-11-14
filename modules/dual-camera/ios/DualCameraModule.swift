@@ -120,7 +120,7 @@ public class DualCameraModule: Module {
     View(DualCameraView.self) {
       Events(
         "onReady", "onMicChange", "onCameraError", "onAutoStopped", "onZoomRange", "onZoomChange", "onAudioLevel", "onPipMove",
-        "onHardwareButton", "onOrientationChange")
+        "onHardwareButton", "onOrientationChange", "onFocusLock")
 
       Prop("cameras") { (view: DualCameraView, value: String) in
         view.setCameras(value)

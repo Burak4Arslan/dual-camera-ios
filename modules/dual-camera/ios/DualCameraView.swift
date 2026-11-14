@@ -880,6 +880,7 @@ final class DualCameraView: ExpoView,
   let onPipMove = EventDispatcher()
   let onHardwareButton = EventDispatcher()
   let onOrientationChange = EventDispatcher()
+  let onFocusLock = EventDispatcher()
 
   /// Donanım tarafı ortak ve açılışta hazırlanır (CameraRig.prewarm); aşağıdakiler ona bakar.
   private let rig = CameraRig.shared
@@ -963,8 +964,20 @@ final class DualCameraView: ExpoView,
   /// Kaydedilen karenin ekrandaki yeri (son yerleşimden).
   private var videoRect: CGRect = .zero
   private lazy var pipPan = UIPanGestureRecognizer(target: self, action: #selector(pipPanned(_:)))
+  /// Yer değiştirme: pencere düzeninde küçük pencereye tek dokunuş, bölünmüşte bir yarıya çift dokunuş
+  /// (tek dokunuş orada odaklar).
   private lazy var pipTap = UITapGestureRecognizer(target: self, action: #selector(swapTapped))
   private lazy var mainTap = UITapGestureRecognizer(target: self, action: #selector(swapTapped))
+  /// Dokunarak odaklama ve pozlama (dokunulan görüntünün kamerasında); basılı tutmak kilitler.
+  private lazy var mainFocusTap = UITapGestureRecognizer(target: self, action: #selector(focusTapped(_:)))
+  private lazy var pipFocusTap = UITapGestureRecognizer(target: self, action: #selector(focusTapped(_:)))
+  private lazy var mainFocusHold = UILongPressGestureRecognizer(target: self, action: #selector(focusHeld(_:)))
+  private lazy var pipFocusHold = UILongPressGestureRecognizer(target: self, action: #selector(focusHeld(_:)))
+  /// Kamera uygulamasındaki gibi sarı kare; kilitliyken ekranda kalır.
+  private let focusSquare = UIView()
+  private var focusLocked = false
+  /// Kare kaybolmadan yeni dokunuş gelirse eski kaybolma iptal olsun.
+  private var focusGeneration = 0
   /// İki parmakla yakınlaştırma; önizlemenin her yerinde (küçük pencerenin üstünde de).
   private lazy var zoomPinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
   /// Büyük görüntüdeki kameranın yakınlaştırması ve sınırları (ana thread kopyası); iki parmak buradan başlar.
@@ -1019,6 +1032,18 @@ final class DualCameraView: ExpoView,
     pipContainer.addGestureRecognizer(pipPan)
     pipContainer.addGestureRecognizer(pipTap)
     mainContainer.addGestureRecognizer(mainTap)
+    mainTap.numberOfTapsRequired = 2
+    for (container, tap, hold) in [(mainContainer, mainFocusTap, mainFocusHold), (pipContainer, pipFocusTap, pipFocusHold)] {
+      tap.delegate = self
+      hold.minimumPressDuration = 0.6
+      container.addGestureRecognizer(tap)
+      container.addGestureRecognizer(hold)
+    }
+    focusSquare.layer.borderColor = UIColor.systemYellow.cgColor
+    focusSquare.layer.borderWidth = 1.5
+    focusSquare.isUserInteractionEnabled = false
+    focusSquare.alpha = 0
+    addSubview(focusSquare)
     // Pencere tek parmakla sürüklenir; iki parmak yakınlaştırmaya kalır.
     pipPan.maximumNumberOfTouches = 1
     addGestureRecognizer(zoomPinch)
@@ -1048,6 +1073,8 @@ final class DualCameraView: ExpoView,
                    name: .AVCaptureSessionRuntimeError, object: session)
     nc.addObserver(self, selector: #selector(sessionInterrupted),
                    name: .AVCaptureSessionWasInterrupted, object: session)
+    nc.addObserver(self, selector: #selector(subjectAreaChanged(_:)),
+                   name: AVCaptureDevice.subjectAreaDidChangeNotification, object: nil)
     nc.addObserver(self, selector: #selector(sessionInterruptionEnded),
                    name: .AVCaptureSessionInterruptionEnded, object: session)
   }
@@ -1090,6 +1117,9 @@ final class DualCameraView: ExpoView,
     cutoutLayer.isHidden = !cutout
     pipPan.isEnabled = dual && layout != .split
     pipTap.isEnabled = dual && !cutout
+    pipTap.numberOfTapsRequired = layout == .split ? 2 : 1
+    pipFocusTap.isEnabled = dual && layout == .split
+    pipFocusHold.isEnabled = dual && layout == .split
     mainTap.isEnabled = dual && layout == .split
 
     if dual && layout == .split {
@@ -1181,6 +1211,7 @@ final class DualCameraView: ExpoView,
   /// JS'ten (ayarlardan): "pip" ya da "split". Tek videoya da aynı düzen yazılır.
   func setLayout(_ value: String) {
     guard let newLayout = DualLayout(rawValue: value), newLayout != layout else { return }
+    releaseFocus()
     layout = newLayout
     setNeedsLayout()
     syncRecordingLayout()
@@ -1193,6 +1224,119 @@ final class DualCameraView: ExpoView,
     pipCenter = center
     setNeedsLayout()
     syncRecordingLayout()
+  }
+
+  // MARK: - Odak ve pozlama
+
+  @objc private func focusTapped(_ tap: UITapGestureRecognizer) {
+    guard let container = tap.view else { return }
+    focus(in: container, at: tap.location(in: container), lock: false)
+  }
+
+  @objc private func focusHeld(_ hold: UILongPressGestureRecognizer) {
+    guard hold.state == .began, let container = hold.view else { return }
+    focus(in: container, at: hold.location(in: container), lock: true)
+  }
+
+  /// Kaptaki görüntü ön kameranın mı (yerleşimdeki seçimle aynı).
+  private func showsFront(_ container: UIView) -> Bool {
+    let frontInMain = (mode == .both && swapped && layout != .cutout) || mode == .front
+    return container === mainContainer ? frontInMain : !frontInMain
+  }
+
+  /// Ana thread. Noktayı önizlemenin (doldurma, dönüş ve ayna dahil) kamera koordinatına çevirir.
+  private func focus(in container: UIView, at point: CGPoint, lock: Bool) {
+    let front = showsFront(container)
+    let preview = front ? frontPreview : backPreview
+    let devicePoint = preview.captureDevicePointConverted(fromLayerPoint: preview.convert(point, from: container.layer))
+    showFocusSquare(at: container.convert(point, to: self), locked: lock)
+    setFocusLocked(lock)
+    sessionQueue.async { [weak self] in
+      guard let self else { return }
+      let target = (front ? self.front : self.back)?.device
+      // Aynı anda tek kamera odaklanmış/kilitli kalır; diğeri otomatiğe döner.
+      for device in [self.back?.device, self.front?.device].compactMap({ $0 }) where device !== target {
+        Self.applyFocus(device, at: nil, lock: false)
+      }
+      if let target { Self.applyFocus(target, at: devicePoint, lock: lock) }
+    }
+  }
+
+  /// sessionQueue. `point` nil: ortada sürekli otomatik (varsayılan). Kilitte odak ve pozlama bir
+  /// kez ayarlanıp öyle kalır; değilse sahne değişince (`subjectAreaChanged`) otomatiğe döner.
+  private static func applyFocus(_ device: AVCaptureDevice, at point: CGPoint?, lock: Bool) {
+    let target = point ?? CGPoint(x: 0.5, y: 0.5)
+    do {
+      try device.lockForConfiguration()
+      defer { device.unlockForConfiguration() }
+      // Nokta, mod ayarlanınca geçerli olur; önce nokta.
+      if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = target }
+      let focusMode: AVCaptureDevice.FocusMode = lock ? .autoFocus : .continuousAutoFocus
+      if device.isFocusModeSupported(focusMode) { device.focusMode = focusMode }
+      if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = target }
+      let exposureMode: AVCaptureDevice.ExposureMode = lock ? .autoExpose : .continuousAutoExposure
+      if device.isExposureModeSupported(exposureMode) { device.exposureMode = exposureMode }
+      device.isSubjectAreaChangeMonitoringEnabled = point != nil && !lock
+    } catch {
+      // Kilitlenemezse dokunuş yok sayılır; kamera otomatikte kalır.
+    }
+  }
+
+  /// Dokunulan yere odaklandıktan sonra sahne belirgin şekilde değişti: Kamera uygulaması gibi
+  /// ortada sürekli otomatiğe dön (kilitliyse izleme kapalı, buraya gelmez).
+  @objc private func subjectAreaChanged(_ note: Notification) {
+    guard let device = note.object as? AVCaptureDevice else { return }
+    sessionQueue.async { [weak self] in
+      guard let self, device === self.back?.device || device === self.front?.device else { return }
+      Self.applyFocus(device, at: nil, lock: false)
+    }
+    DispatchQueue.main.async { [weak self] in
+      guard let self, !self.focusLocked else { return }
+      self.hideFocusSquare()
+    }
+  }
+
+  /// Ana thread. Görüntüler yer değiştirince, kamera ya da çekim türü değişince odak sıfırlanır.
+  private func releaseFocus() {
+    hideFocusSquare()
+    setFocusLocked(false)
+    sessionQueue.async { [weak self] in
+      guard let self else { return }
+      for device in [self.back?.device, self.front?.device].compactMap({ $0 }) {
+        Self.applyFocus(device, at: nil, lock: false)
+      }
+    }
+  }
+
+  private func setFocusLocked(_ locked: Bool) {
+    guard locked != focusLocked else { return }
+    focusLocked = locked
+    onFocusLock(["locked": locked])
+  }
+
+  private func showFocusSquare(at center: CGPoint, locked: Bool) {
+    focusGeneration += 1
+    let generation = focusGeneration
+    let side = min(bounds.width, bounds.height) * 0.2
+    focusSquare.layer.removeAllAnimations()
+    focusSquare.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+    focusSquare.center = center
+    focusSquare.transform = CGAffineTransform(scaleX: 1.4, y: 1.4)
+    focusSquare.alpha = 1
+    bringSubviewToFront(focusSquare)
+    UIView.animate(withDuration: 0.25, delay: 0, usingSpringWithDamping: 0.6, initialSpringVelocity: 0) {
+      self.focusSquare.transform = .identity
+    } completion: { _ in
+      guard !locked, generation == self.focusGeneration else { return }
+      UIView.animate(withDuration: 0.4, delay: 1.0, options: [.allowUserInteraction]) {
+        self.focusSquare.alpha = 0
+      }
+    }
+  }
+
+  private func hideFocusSquare() {
+    focusGeneration += 1
+    UIView.animate(withDuration: 0.2) { self.focusSquare.alpha = 0 }
   }
 
   // MARK: - Ses tuşları
@@ -1220,6 +1364,7 @@ final class DualCameraView: ExpoView,
 
   /// Pencereye (bölünmüşte iki yarıdan birine) dokununca kameralar yer değiştirir.
   @objc private func swapTapped() {
+    releaseFocus()
     swapped.toggle()
     UIView.transition(with: self, duration: 0.25, options: .transitionCrossDissolve) {
       self.setNeedsLayout()
@@ -1309,6 +1454,7 @@ final class DualCameraView: ExpoView,
       guard newMode != .both, mode != .both else { return }
       dataQueue.async { [weak self] in self?.recorder?.pendingSource = newMode }
     }
+    releaseFocus()
     mode = newMode
     setNeedsLayout()
     let zoomFront = zoomTargetIsFront
@@ -1326,6 +1472,7 @@ final class DualCameraView: ExpoView,
   /// JS'ten gelen çekim türü: "video" ya da "photo". Kayıt sırasında değişmez.
   func setCaptureMode(_ value: String) {
     guard !isRecording, let newKind = CaptureKind(rawValue: value), newKind != kind else { return }
+    releaseFocus()
     kind = newKind
     UserDefaults.standard.set(newKind.rawValue, forKey: CameraRig.kindKey)
     sessionQueue.async { [weak self] in
@@ -1983,5 +2130,21 @@ final class DualCameraView: ExpoView,
     default:
       track.appendVideo(sample)
     }
+  }
+}
+
+extension DualCameraView: UIGestureRecognizerDelegate {
+  /// Odak dokunuşu, basılı tutma (kilit) olmadığı anlaşılınca çalışır; bölünmüş düzende ayrıca çift
+  /// dokunuşun (yer değiştirme) olmadığı anlaşılınca.
+  func gestureRecognizer(
+    _ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer
+  ) -> Bool {
+    if gestureRecognizer === mainFocusTap {
+      return other === mainFocusHold || (other === mainTap && mainTap.isEnabled)
+    }
+    if gestureRecognizer === pipFocusTap {
+      return other === pipFocusHold || (other === pipTap && pipTap.isEnabled && pipTap.numberOfTapsRequired == 2)
+    }
+    return false
   }
 }

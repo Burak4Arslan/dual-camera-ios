@@ -73,6 +73,9 @@ export type DualCameraViewProps = ViewProps & {
   onZoomChange?: (e: NativeSyntheticEvent<{ zoom: number; active: boolean }>) => void;
   /** Mikrofonun ses düzeyi (dB; 0 en yüksek, -50 altı sessiz), saniyede ~10 kez. Yalnızca video modunda. */
   onAudioLevel?: (e: NativeSyntheticEvent<{ db: number }>) => void;
+  /** Dokunarak odak: basılı tutunca odak ve pozlama kilitlenir (`locked`); yeni dokunuş, yer
+   * değiştirme ya da kamera değişince kilit kalkar. */
+  onFocusLock?: (e: NativeSyntheticEvent<{ locked: boolean }>) => void;
 };
 
 export type ZoomRange = { min: number; max: number; zoom: number };

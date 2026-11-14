@@ -153,6 +153,7 @@ export default function CameraScreen() {
   const [capture, setCapture] = useRemembered<CaptureMode>('capture', 'video', CAPTURE_MODES);
   const [cameras, setCameraSelection] = useRemembered<CameraMode>('cameras', 'both', ['both', 'back', 'front']);
   const [torch, setTorch] = useState(false);
+  const [focusLocked, setFocusLocked] = useState(false);
   /** Ön ışık: ekran tam parlak ve beyaz, önizleme ortada küçük; yüzü aydınlatır. Kayda etkisi yok. */
   const [frontLight, setFrontLight] = useState(false);
   const [zoom, setZoom] = useState(1);
@@ -495,6 +496,7 @@ export default function CameraScreen() {
         hardwareButtons={settings.volumeButtons && focused}
         onHardwareButton={(e) => onHardwareButton(e.nativeEvent.button)}
         onOrientationChange={(e) => setUiOrientation(e.nativeEvent.orientation)}
+        onFocusLock={(e) => setFocusLocked(e.nativeEvent.locked)}
         onPipMove={(e) => settings.update({ pipPosition: { x: e.nativeEvent.x, y: e.nativeEvent.y } })}
         style={StyleSheet.absoluteFill}
         onMicChange={(e) => setMic(e.nativeEvent)}
@@ -569,6 +571,11 @@ export default function CameraScreen() {
           </Pressable>
         )}
         <View style={[styles.pills, controlsLeft && styles.pillsRight]} pointerEvents="box-none">
+          {focusLocked && (
+            <View style={[styles.pill, styles.focusLock]}>
+              <Text style={[styles.pillText, styles.focusLockText]}>{s.focusLock}</Text>
+            </View>
+          )}
           {/* Foto seçenekleri; yenileri de buraya eklenir. */}
           {capture === 'photo' && !active && (
             <Pressable style={[styles.pill, styles.option]} onPress={() => setIntervalPicker(!intervalPicker)}>
@@ -887,6 +894,8 @@ const styles = StyleSheet.create({
   option: { backgroundColor: '#000a' },
   micExternal: { backgroundColor: '#1f9d55cc' },
   micWarning: { backgroundColor: '#d97706cc' },
+  focusLock: { backgroundColor: '#facc15' },
+  focusLockText: { color: '#000' },
   meter: { width: 44, height: 6, borderRadius: 3, marginLeft: 8, backgroundColor: '#ffffff33', overflow: 'hidden' },
   meterFill: { width: '100%', height: '100%', transformOrigin: 'left' },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
