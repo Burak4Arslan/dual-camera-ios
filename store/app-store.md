@@ -129,6 +129,55 @@ Using the front and back cameras at once requires iPhone XS / XR or later.
 
 **What's new (1.0):** First release.
 
+## Español
+
+Uygulama içi metinler Latin Amerika kullanımıyla (video, Configuración). App Store'da **es-MX** ABD
+mağazasında da aranır (ikinci 100 karakterlik anahtar kelime alanı); **es-ES** İspanya için. Aynı ad iki
+yerelleştirmede kullanılamadı ("başka hesapta kullanılıyor"), İspanya'ya ayrı ad verildi.
+
+| Alan | es-MX | es-ES |
+|---|---|---|
+| Ad | Cámara Dual: Frontal y Trasera | Doble Cámara: Vlog y Reacción |
+| Alt başlık | Vlog y videos de reacción | Frontal y trasera a la vez |
+| Anahtar kelimeler | doble,dos,cámaras,selfie,pantalla,dividida,pip,grabar,simultánea,multicam,entrevista,micrófono | dual,dos,cámaras,selfie,pantalla,dividida,pip,grabar,simultánea,multicam,entrevista,micrófono,videos |
+
+**Descripción** (es-ES'te "0,5×"):
+
+Graba video y toma fotos con las cámaras frontal y trasera al mismo tiempo. Captura la escena y a ti mismo en una sola toma: ideal para vlogs de viaje, reseñas de productos, reacciones y entrevistas.
+
+TRES DISEÑOS
+• Ventana: tu cara en una ventana pequeña. Arrástrala a donde quieras; tócala para intercambiar las cámaras.
+• Pantalla dividida: lado a lado en horizontal, una sobre otra en vertical.
+• Ponerme en la escena: se quita la habitación detrás de ti y solo tú apareces sobre la escena, sin pantalla verde.
+
+GRABACIÓN
+• Guarda dos videos separados para editar con libertad, o un solo video con lo que ves en pantalla.
+• Pausar / reanudar: las partes en pausa no entran en el video.
+• Toma fotos mientras grabas y cambia entre la cámara trasera y la frontal en modo de una cámara: la grabación sigue en un solo archivo.
+• Dispara con los botones de volumen: bajar volumen inicia/detiene, subir volumen toma una foto durante la grabación. También funciona con controles Bluetooth.
+• Grabación segura: aunque la app se cierre, tu grabación no se pierde; se recupera en tu fototeca la próxima vez que abras la app.
+• Como en la app Cámara, la fecha, el dispositivo y (si quieres) la ubicación se guardan en cada archivo.
+
+FOTOS
+• La máxima calidad de foto de tu dispositivo.
+• Fotos a intervalos: cada 1–60 segundos hasta que te detengas.
+
+CÁMARA
+• Zoom desde 0.5× hasta el máximo de tu iPhone (hasta 25× en modelos Pro), con dos dedos o botones rápidos.
+• Toca para enfocar; mantén presionado para bloquear el enfoque y la exposición.
+• Luz de la cámara trasera y una luz frontal que ilumina tu cara.
+• Ventana de contacto visual: una copia pequeña de la imagen queda junto al lente, así miras a la cámara mientras hablas.
+• Cuadrícula, bloqueo horizontal/vertical y controles del lado de la mano con la que sostienes el teléfono.
+
+AUDIO
+• Compatible con micrófonos de solapa y medidor de nivel de audio en vivo.
+• Reducción de ruido de fondo.
+
+PRIVACIDAD
+Sin cuentas, sin anuncios, sin recopilación de datos. Todo ocurre en tu dispositivo.
+
+Usar las cámaras frontal y trasera a la vez requiere iPhone XS / XR o posterior.
+
 ## App Review notları (Notes for App Review)
 
 > The app records with the front and back cameras simultaneously using AVCaptureMultiCamSession, so it

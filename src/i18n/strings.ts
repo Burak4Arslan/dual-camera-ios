@@ -1,14 +1,14 @@
-export const LANGUAGES = ['tr', 'en'] as const;
+export const LANGUAGES = ['tr', 'en', 'es'] as const;
 export type Language = (typeof LANGUAGES)[number];
 
 /** Dil seçiminde her dil kendi adıyla görünür. */
-export const LANGUAGE_NAMES: Record<Language, string> = { tr: 'Türkçe', en: 'English' };
+export const LANGUAGE_NAMES: Record<Language, string> = { tr: 'Türkçe', en: 'English', es: 'Español' };
 
 /** Dil seçicideki bayraklar (dilin çıktığı ülke). */
-export const LANGUAGE_FLAGS: Record<Language, string> = { tr: '🇹🇷', en: '🇬🇧' };
+export const LANGUAGE_FLAGS: Record<Language, string> = { tr: '🇹🇷', en: '🇬🇧', es: '🇪🇸' };
 
 /** Sayı biçimi (ondalık ve binlik ayırıcı) için. */
-export const LANGUAGE_LOCALES: Record<Language, string> = { tr: 'tr-TR', en: 'en-US' };
+export const LANGUAGE_LOCALES: Record<Language, string> = { tr: 'tr-TR', en: 'en-US', es: 'es-MX' };
 
 // `{n}`, `{time}` gibi yerler `fill` ile doldurulur.
 const tr = {
@@ -236,4 +236,114 @@ const en: Strings = {
   },
 };
 
-export const STRINGS: Record<Language, Strings> = { tr, en };
+// İspanyolca: Latin Amerika kullanımı (video, Configuración); App Store'da es-MX ABD'de de aranıyor.
+const es: Strings = {
+  appName: 'Cámara Dual',
+  widgetSubtitle: 'Abrir cámara',
+  camera: { both: 'Frontal +\nTrasera', back: 'Trasera', front: 'Frontal' },
+  capture: { video: 'VIDEO', photo: 'FOTO' },
+  orientation: { landscape: 'Horizontal', portrait: 'Vertical' },
+  interval: { label: 'Intervalo', off: 'No', seconds: '{n} s' },
+  zoom: { max: 'Máx' },
+  focusLock: 'BLOQUEO AE/AF',
+  storage: { minutes: '~{n} min', hours: '~{h} h {m} min', photos: '~{n} fotos' },
+  mic: {
+    builtIn: 'Micrófono integrado',
+    denied: 'Sin acceso al micrófono, el video se grabará sin sonido',
+  },
+  saved: {
+    videos: '2 videos (escena + cara) guardados en Fotos ({time})',
+    video: 'Video guardado en Fotos ({time})',
+    photos: '2 fotos (escena + cara) guardadas en Fotos',
+    photo: 'Foto guardada en Fotos',
+    recordingStopped: 'La grabación se detuvo.',
+    salvaged: 'Hubo un problema durante la grabación, pero el video se recuperó.',
+    recoveredCount: 'Se recuperaron {n} grabaciones sin terminar y se guardaron en Fotos.',
+    shootingStopped: 'Se detuvo, {n} fotos guardadas en Fotos',
+    photoCount: '{n} fotos',
+  },
+  start: {
+    notSupported: 'Este dispositivo no puede usar las cámaras frontal y trasera a la vez.',
+    waiting: 'Esperando permisos…',
+    cameraDenied: 'Se necesita acceso a la cámara.',
+    openSettings: 'Abrir Configuración',
+  },
+  errors: {
+    notSupported: 'Este dispositivo no puede usar dos cámaras a la vez.',
+    noCamera: 'No se pudieron abrir las cámaras.',
+    notRecording: 'No se está grabando.',
+    tooShort: 'Grabación demasiado corta, no se capturó ningún cuadro.',
+    writerFailed: 'No se pudo escribir el video.',
+    photosDenied: 'Sin permiso para guardar en Fotos. Configuración > Cámara Dual > Fotos.',
+    saveFailed: 'No se pudo guardar en Fotos.',
+    savePending: 'No se pudo guardar en Fotos, pero el video está a salvo; se volverá a intentar la próxima vez que abras la app.',
+    photoFailed: 'No se pudo tomar la foto.',
+    torchUnavailable: 'La luz no está disponible ahora (puede que el teléfono esté caliente).',
+    torchFailed: 'No se pudo encender la luz.',
+    audioSession: 'No se pudo iniciar el audio.',
+    runtime: 'Error de la cámara.',
+    recordFailed: 'No se puede grabar con la cámara.',
+    unknown: 'Algo salió mal.',
+  },
+  settings: {
+    title: 'Configuración',
+    done: 'OK',
+    language: 'Idioma',
+    camera: 'Cámara',
+    grid: 'Cuadrícula',
+    video: 'Video',
+    dual: 'Frontal+Trasera',
+    layoutPip: 'Ventana',
+    layoutPipHint: 'Arrastra la ventana pequeña a donde quieras; tócala para intercambiar las cámaras. Toca la vista grande para enfocar ahí.',
+    layoutSplit: 'Pantalla dividida',
+    layoutSplitHint: 'Lado a lado en horizontal, una sobre otra en vertical. Toca una mitad para enfocar; tócala dos veces para intercambiar.',
+    layoutCutout: 'Ponerme en la escena',
+    layoutCutoutHint: 'Se quita la habitación detrás de ti y solo tú apareces sobre la escena; arrastra para moverte. Se guarda como un solo archivo.',
+    combineVideoLocked: 'Ponerme en la escena siempre se guarda como un solo archivo.',
+    combineVideo: 'Un solo archivo',
+    combineVideoHint: 'Guarda lo que ves en pantalla como un solo archivo.',
+    volumeButtons: 'Disparar con los botones de volumen',
+    volumeButtonsHint: 'Bajar volumen: grabar / detener. Subir volumen: foto durante la grabación.',
+    eyeContact: 'Ventana de contacto visual',
+    eyeContactHint: 'Una copia pequeña de la imagen queda junto al lente; al mirarla, miras a la cámara.',
+    saveLocation: 'Guardar ubicación',
+    saveLocationHint: 'Se escribe en el archivo y aparece en el mapa de Fotos. Nunca se envía a ningún lado.',
+    saveLocationDenied: 'El acceso a la ubicación está desactivado. Toca para activarlo.',
+    noiseReduction: 'Reducir ruido de fondo',
+    noiseReductionHint: 'Lo limpia al grabar. Déjalo desactivado si lo vas a limpiar después en CapCut.',
+    dimScreen: 'Atenuar en grabaciones largas',
+    dimScreenHint: 'El brillo baja tras 30 s sin tocar la pantalla; toca para restaurarlo.',
+    about: 'Acerca de',
+    version: 'Versión',
+    contact: 'Contáctanos',
+    privacy: 'Política de privacidad',
+  },
+  privacy: {
+    title: 'Política de privacidad',
+    updated: 'Fecha de entrada en vigor: 14 de noviembre de 2026',
+    sections: [
+      ['En resumen', 'La app no recopila, guarda ni comparte ningún dato personal. No hay cuentas, anuncios, análisis ni seguimiento, y no se envía ningún dato a ningún servidor.'],
+      ['Cámara y micrófono', 'Se usan solo para grabar video y tomar fotos. Las imágenes y el audio se procesan solo en tu dispositivo. Sin acceso al micrófono, los videos se guardan sin sonido.'],
+      ['Fotos', 'Solo para agregar lo que grabas a tu fototeca. La app no puede leer el contenido que ya tienes.'],
+      ['Ubicación', 'Si lo permites y "Guardar ubicación" está activado, el lugar donde grabaste se escribe en tus videos y fotos, como en la app Cámara. La ubicación solo se agrega al archivo en tu dispositivo y nunca se envía a ningún lado. Puedes desactivarlo en Configuración.'],
+      ['Procesamiento en el dispositivo', 'Ponerme en la escena, la reducción de ruido, Un solo archivo y todas las demás funciones se ejecutan por completo en tu dispositivo con las herramientas integradas de Apple.'],
+      ['Guardado en tu dispositivo', 'Tu configuración se guarda solo en tu dispositivo. Las grabaciones se guardan en el espacio propio de la app hasta que pasan a tu fototeca y luego se borran; así, una grabación no se pierde si la app se cierra inesperadamente.'],
+      ['Contacto', '{developer} – {email}'],
+    ],
+  },
+  a11y: {
+    settings: 'Configuración',
+    torch: 'Luz de la cámara trasera',
+    frontLight: 'Luz frontal',
+    flip: 'Cambiar de cámara',
+    pause: 'Pausar la grabación',
+    resume: 'Reanudar la grabación',
+    snap: 'Tomar una foto durante la grabación',
+    record: 'Iniciar la grabación',
+    stop: 'Detener',
+    photo: 'Tomar foto',
+    interval: 'Iniciar fotos a intervalos',
+  },
+};
+
+export const STRINGS: Record<Language, Strings> = { tr, en, es };

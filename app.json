@@ -56,7 +56,8 @@
           "supportedLocales": {
             "ios": [
               "en",
-              "tr"
+              "tr",
+              "es"
             ]
           }
         }
@@ -86,7 +87,8 @@
     ],
     "locales": {
       "tr": "./locales/tr.json",
-      "en": "./locales/en.json"
+      "en": "./locales/en.json",
+      "es": "./locales/es.json"
     }
   }
 }

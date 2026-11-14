@@ -1,0 +1,9 @@
+{
+  "ios": {
+    "CFBundleDisplayName": "Cámara Dual",
+    "NSCameraUsageDescription": "Las cámaras frontal y trasera se usan para grabar videos y tomar fotos.",
+    "NSMicrophoneUsageDescription": "El micrófono graba el sonido de tus videos. Sin acceso, los videos se guardan sin sonido.",
+    "NSPhotoLibraryAddUsageDescription": "Para guardar en tu fototeca los videos y fotos que tomes.",
+    "NSLocationWhenInUseUsageDescription": "Agrega el lugar donde grabaste a tus videos y fotos, como en la app Cámara. La ubicación no sale de tu dispositivo."
+  }
+}
